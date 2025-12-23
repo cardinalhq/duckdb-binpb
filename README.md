@@ -6,7 +6,7 @@ A DuckDB extension for reading OpenTelemetry binary protobuf (binpb) metric file
 
 - Read OpenTelemetry `ExportMetricsServiceRequest` from `.binpb` files
 - Automatic gzip decompression for `.binpb.gz` files
-- Glob pattern support for reading multiple files with schema unioning
+- Multiple file support: glob patterns or explicit list `[file1, file2]` with schema unioning
 - Supports all OTEL metric types: Gauge, Sum, Histogram, ExponentialHistogram, Summary
 - DDSketch integration for histogram quantile computation
 - TID (Telemetry ID) calculation for time series identification
@@ -29,6 +29,9 @@ SELECT * FROM otel_metrics_read('path/to/metrics.binpb.gz', customer_id='my-cust
 
 -- Read multiple files with glob pattern (schema unioning)
 SELECT * FROM otel_metrics_read('testdata/metrics_*.binpb.gz', customer_id='my-customer');
+
+-- Read specific files using list syntax
+SELECT * FROM otel_metrics_read('[file1.binpb.gz, file2.binpb.gz]', customer_id='my-customer');
 
 -- Query specific metrics
 SELECT
@@ -59,7 +62,7 @@ GROUP BY metric_name, chq_tid;
 
 | Parameter | Type | Required | Description |
 | ----------- | ------ | ---------- | ------------- |
-| File path | VARCHAR | Yes | File path or glob pattern (e.g., `*.binpb.gz`) |
+| File path | VARCHAR | Yes | File path, glob pattern (`*.binpb.gz`), or list (`[file1, file2]`) |
 | `customer_id` | VARCHAR | Yes | Customer identifier for `chq_customer_id` field |
 
 ## Output Columns

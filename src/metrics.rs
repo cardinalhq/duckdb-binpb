@@ -649,10 +649,37 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
 // DuckDB Table Function
 // ============================================================================
 
-/// Expand a file path that may contain glob patterns into a list of matching files
-fn expand_glob_pattern(pattern: &str) -> Result<Vec<String>, Box<dyn Error>> {
+/// Expand a file path that may contain glob patterns into a list of matching files.
+/// Also handles list syntax like `['file1.binpb', 'file2.binpb']`.
+fn expand_file_input(input: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    let input = input.trim();
+
+    // Check for list syntax: [file1, file2, ...]
+    if input.starts_with('[') && input.ends_with(']') {
+        let inner = &input[1..input.len() - 1];
+        let mut paths = Vec::new();
+        for part in inner.split(',') {
+            let path = part.trim().trim_matches(|c| c == '\'' || c == '"');
+            if !path.is_empty() {
+                // Each element can also be a glob
+                let expanded = expand_single_path(path)?;
+                paths.extend(expanded);
+            }
+        }
+        if paths.is_empty() {
+            return Err("Empty file list".into());
+        }
+        return Ok(paths);
+    }
+
+    // Single path or glob
+    expand_single_path(input)
+}
+
+/// Expand a single file path that may be a glob pattern
+fn expand_single_path(pattern: &str) -> Result<Vec<String>, Box<dyn Error>> {
     // Check if this looks like a glob pattern
-    if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
+    if pattern.contains('*') || pattern.contains('?') {
         let paths: Vec<String> = glob::glob(pattern)?
             .filter_map(|entry| entry.ok())
             .map(|path| path.to_string_lossy().to_string())
@@ -691,7 +718,7 @@ impl VTab for ReadMetricsVTab {
         let param_count = bind.get_parameter_count();
         if param_count < 1 {
             return Err(
-                "Usage: otel_metrics_read('file.binpb' or 'glob/*.binpb', customer_id='xxx')"
+                "Usage: otel_metrics_read('file.binpb', customer_id='xxx') or otel_metrics_read(['file1.binpb', 'file2.binpb'], customer_id='xxx')"
                     .into(),
             );
         }
@@ -702,9 +729,10 @@ impl VTab for ReadMetricsVTab {
             .ok_or("Missing required named parameter: customer_id")?
             .to_string();
 
-        // Get file path/glob pattern from first positional parameter
-        let file_pattern = bind.get_parameter(0).to_string();
-        let file_paths = expand_glob_pattern(&file_pattern)?;
+        // Get file path(s) from first positional parameter
+        // Supports: single path, glob pattern, or list ['file1', 'file2']
+        let file_input = bind.get_parameter(0).to_string();
+        let file_paths = expand_file_input(&file_input)?;
 
         // Parse all files and collect rows
         let mut all_rows = Vec::new();
@@ -891,9 +919,7 @@ impl VTab for ReadMetricsVTab {
     }
 
     fn parameters() -> Option<Vec<LogicalTypeHandle>> {
-        // Single VARCHAR parameter for file path or glob pattern
-        // Multiple files can be passed by calling the function multiple times in a UNION
-        // or by using a glob pattern
+        // Single VARCHAR parameter: can be a path, glob, or list like ['file1', 'file2']
         Some(vec![LogicalTypeHandle::from(LogicalTypeId::Varchar)])
     }
 
