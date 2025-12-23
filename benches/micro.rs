@@ -1,6 +1,11 @@
 // Copyright 2025 CardinalHQ, Inc.
 //
-// Micro-benchmarks for identifying specific bottlenecks
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+
+//! Micro-benchmarks for identifying specific bottlenecks
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
 use otel_metrics::common::read_binpb_file;
