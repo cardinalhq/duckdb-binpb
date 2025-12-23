@@ -32,7 +32,7 @@ use crate::normalize::normalize_attribute_name;
 use crate::opentelemetry::proto::{
     collector::metrics::v1::ExportMetricsServiceRequest,
     common::v1::KeyValue,
-    metrics::v1::{metric, Metric},
+    metrics::v1::{metric, AggregationTemporality, Metric},
 };
 use crate::sketch::{
     exponential_histogram_to_sketch, histogram_to_sketch, summary_to_sketch, DDSketch,
@@ -70,6 +70,10 @@ pub struct MetricRow {
     // Scope
     pub chq_scope_name: String,
     pub chq_scope_url: String, // scope version
+
+    // Aggregation properties (Sum, Histogram, ExponentialHistogram only)
+    pub metric_is_monotonic: Option<bool>,   // true/false for Sum, None for others
+    pub metric_temporality: Option<String>,  // "delta", "cumulative", or None
 
     // Sketch and rollups
     pub chq_sketch: Vec<u8>,
@@ -171,6 +175,15 @@ fn otel_metric_type(metric: &Metric) -> &'static str {
     }
 }
 
+/// Convert aggregation temporality enum value to string
+fn temporality_to_string(temporality: i32) -> Option<String> {
+    match temporality {
+        x if x == AggregationTemporality::Delta as i32 => Some("delta".to_string()),
+        x if x == AggregationTemporality::Cumulative as i32 => Some("cumulative".to_string()),
+        _ => None, // Unspecified or unknown
+    }
+}
+
 /// Check if a histogram datapoint has any non-zero bucket counts.
 /// Returns false if all bucket counts are zero (empty histogram).
 fn histogram_has_counts(
@@ -211,6 +224,8 @@ fn create_row_from_number_datapoint(
     dp_attrs: &[KeyValue],
     time_unix_nano: u64,
     value: f64,
+    is_monotonic: Option<bool>,
+    temporality: Option<String>,
 ) -> MetricRow {
     let otel_type = otel_metric_type(metric);
     let chq_type = metric_type_to_string(otel_type);
@@ -243,6 +258,8 @@ fn create_row_from_number_datapoint(
         chq_metric_type: chq_type.to_string(),
         chq_scope_name: scope_name.to_string(),
         chq_scope_url: scope_version.to_string(),
+        metric_is_monotonic: is_monotonic,
+        metric_temporality: temporality,
         chq_sketch: sketch_bytes,
         chq_rollup_avg: stats.avg,
         chq_rollup_count: stats.count,
@@ -269,6 +286,7 @@ fn create_row_from_histogram(
     scope_name: &str,
     scope_version: &str,
     dp: &crate::opentelemetry::proto::metrics::v1::HistogramDataPoint,
+    temporality: Option<String>,
 ) -> MetricRow {
     let normalized_name = normalize_attribute_name(&metric.name);
 
@@ -311,6 +329,8 @@ fn create_row_from_histogram(
         chq_metric_type: "histogram".to_string(),
         chq_scope_name: scope_name.to_string(),
         chq_scope_url: scope_version.to_string(),
+        metric_is_monotonic: None, // Histograms don't have is_monotonic
+        metric_temporality: temporality,
         chq_sketch: sketch_bytes,
         chq_rollup_avg: stats.avg,
         chq_rollup_count: stats.count,
@@ -337,6 +357,7 @@ fn create_row_from_exp_histogram(
     scope_name: &str,
     scope_version: &str,
     dp: &crate::opentelemetry::proto::metrics::v1::ExponentialHistogramDataPoint,
+    temporality: Option<String>,
 ) -> MetricRow {
     let normalized_name = normalize_attribute_name(&metric.name);
 
@@ -388,6 +409,8 @@ fn create_row_from_exp_histogram(
         chq_metric_type: "histogram".to_string(),
         chq_scope_name: scope_name.to_string(),
         chq_scope_url: scope_version.to_string(),
+        metric_is_monotonic: None, // Exponential histograms don't have is_monotonic
+        metric_temporality: temporality,
         chq_sketch: sketch_bytes,
         chq_rollup_avg: stats.avg,
         chq_rollup_count: stats.count,
@@ -406,6 +429,7 @@ fn create_row_from_exp_histogram(
 }
 
 /// Create row from summary data point
+/// Note: Summary metrics don't have aggregation temporality or is_monotonic
 fn create_row_from_summary(
     customer_id: &str,
     metric: &Metric,
@@ -451,6 +475,8 @@ fn create_row_from_summary(
         chq_metric_type: "histogram".to_string(),
         chq_scope_name: scope_name.to_string(),
         chq_scope_url: scope_version.to_string(),
+        metric_is_monotonic: None, // Summaries don't have is_monotonic
+        metric_temporality: None,  // Summaries don't have aggregation_temporality
         chq_sketch: sketch_bytes,
         chq_rollup_avg: stats.avg,
         chq_rollup_count: stats.count,
@@ -506,6 +532,7 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
             for metric in &sm.metrics {
                 match &metric.data {
                     Some(metric::Data::Gauge(gauge)) => {
+                        // Gauges don't have is_monotonic or aggregation_temporality
                         for dp in &gauge.data_points {
                             let value = match &dp.value {
                                 Some(
@@ -526,10 +553,13 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
                                 &dp.attributes,
                                 dp.time_unix_nano,
                                 value,
+                                None, // is_monotonic
+                                None, // temporality
                             ));
                         }
                     }
                     Some(metric::Data::Sum(sum)) => {
+                        let temporality = temporality_to_string(sum.aggregation_temporality);
                         for dp in &sum.data_points {
                             let value = match &dp.value {
                                 Some(
@@ -550,10 +580,13 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
                                 &dp.attributes,
                                 dp.time_unix_nano,
                                 value,
+                                Some(sum.is_monotonic),
+                                temporality.clone(),
                             ));
                         }
                     }
                     Some(metric::Data::Histogram(hist)) => {
+                        let temporality = temporality_to_string(hist.aggregation_temporality);
                         for dp in &hist.data_points {
                             // Skip histograms with all-zero bucket counts (matches Go behavior)
                             if !histogram_has_counts(dp) {
@@ -567,10 +600,12 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
                                 &scope_name,
                                 &scope_version,
                                 dp,
+                                temporality.clone(),
                             ));
                         }
                     }
                     Some(metric::Data::ExponentialHistogram(exp_hist)) => {
+                        let temporality = temporality_to_string(exp_hist.aggregation_temporality);
                         for dp in &exp_hist.data_points {
                             // Skip exponential histograms with no counts (matches Go behavior)
                             if !exp_histogram_has_counts(dp) {
@@ -584,6 +619,7 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
                                 &scope_name,
                                 &scope_version,
                                 dp,
+                                temporality.clone(),
                             ));
                         }
                     }
@@ -721,6 +757,8 @@ impl VTab for ReadMetricsVTab {
         bind.add_result_column("chq_metric_type", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("chq_scope_name", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("chq_scope_url", LogicalTypeHandle::from(LogicalTypeId::Varchar));
+        bind.add_result_column("metric_is_monotonic", LogicalTypeHandle::from(LogicalTypeId::Boolean));
+        bind.add_result_column("metric_temporality", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("chq_sketch", LogicalTypeHandle::from(LogicalTypeId::Blob));
         bind.add_result_column("chq_rollup_avg", LogicalTypeHandle::from(LogicalTypeId::Double));
         bind.add_result_column("chq_rollup_count", LogicalTypeHandle::from(LogicalTypeId::Double));
@@ -812,6 +850,20 @@ impl VTab for ReadMetricsVTab {
             col += 1;
 
             output.flat_vector(col).insert(i, row.chq_scope_url.as_bytes());
+            col += 1;
+
+            // metric_is_monotonic (nullable boolean)
+            match row.metric_is_monotonic {
+                Some(v) => output.flat_vector(col).as_mut_slice::<bool>()[i] = v,
+                None => output.flat_vector(col).set_null(i),
+            }
+            col += 1;
+
+            // metric_temporality (nullable varchar)
+            match &row.metric_temporality {
+                Some(v) => output.flat_vector(col).insert(i, v.as_bytes()),
+                None => output.flat_vector(col).set_null(i),
+            }
             col += 1;
 
             output.flat_vector(col).insert(i, &row.chq_sketch);
@@ -1071,6 +1123,126 @@ mod tests {
         assert_eq!(counter_row.metric_name, "test_counter");
         assert_eq!(counter_row.chq_metric_type, "count"); // "sum" -> "count"
         assert!(counter_row.chq_rollup_sum == 12345.0);
+    }
+
+    #[test]
+    fn test_aggregation_temporality_fields() {
+        let request = create_sample_request();
+        let encoded = request.encode_to_vec();
+
+        let rows = parse_metrics(&encoded, "test-customer").expect("Failed to parse metrics");
+
+        // Gauge should have None for both fields
+        let gauge_row = &rows[0];
+        assert_eq!(gauge_row.metric_is_monotonic, None, "Gauge should not have is_monotonic");
+        assert_eq!(gauge_row.metric_temporality, None, "Gauge should not have temporality");
+
+        // Sum (counter) should have both fields populated
+        let counter_row = &rows[1];
+        assert_eq!(counter_row.metric_is_monotonic, Some(true), "Counter should have is_monotonic=true");
+        assert_eq!(counter_row.metric_temporality, Some("cumulative".to_string()), "Counter should have temporality=cumulative");
+    }
+
+    #[test]
+    fn test_aggregation_temporality_delta() {
+        // Create a metric with delta temporality
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(Resource {
+                    attributes: vec![KeyValue {
+                        key: "service.name".to_string(),
+                        value: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue("test-service".to_string())),
+                        }),
+                    }],
+                    dropped_attributes_count: 0,
+                    entity_refs: vec![],
+                }),
+                scope_metrics: vec![ScopeMetrics {
+                    scope: None,
+                    metrics: vec![Metric {
+                        name: "delta.counter".to_string(),
+                        description: "A delta counter".to_string(),
+                        unit: "1".to_string(),
+                        data: Some(metric::Data::Sum(Sum {
+                            data_points: vec![NumberDataPoint {
+                                attributes: vec![],
+                                start_time_unix_nano: 1000000000,
+                                time_unix_nano: 1700000000_000_000_000,
+                                value: Some(crate::opentelemetry::proto::metrics::v1::number_data_point::Value::AsInt(100)),
+                                exemplars: vec![],
+                                flags: 0,
+                            }],
+                            aggregation_temporality: AggregationTemporality::Delta as i32,
+                            is_monotonic: false,
+                        })),
+                        metadata: vec![],
+                    }],
+                    schema_url: "".to_string(),
+                }],
+                schema_url: "".to_string(),
+            }],
+        };
+
+        let encoded = request.encode_to_vec();
+        let rows = parse_metrics(&encoded, "test-customer").expect("Failed to parse metrics");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].metric_is_monotonic, Some(false), "Delta counter should have is_monotonic=false");
+        assert_eq!(rows[0].metric_temporality, Some("delta".to_string()), "Should have temporality=delta");
+    }
+
+    #[test]
+    fn test_histogram_temporality() {
+        // Histogram should have temporality but not is_monotonic
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(Resource {
+                    attributes: vec![KeyValue {
+                        key: "service.name".to_string(),
+                        value: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue("test-service".to_string())),
+                        }),
+                    }],
+                    dropped_attributes_count: 0,
+                    entity_refs: vec![],
+                }),
+                scope_metrics: vec![ScopeMetrics {
+                    scope: None,
+                    metrics: vec![Metric {
+                        name: "request.duration".to_string(),
+                        description: "Request duration".to_string(),
+                        unit: "ms".to_string(),
+                        data: Some(metric::Data::Histogram(Histogram {
+                            data_points: vec![HistogramDataPoint {
+                                attributes: vec![],
+                                start_time_unix_nano: 0,
+                                time_unix_nano: 1700000000_000_000_000,
+                                count: 100,
+                                sum: Some(5000.0),
+                                bucket_counts: vec![10, 30, 40, 15, 5],
+                                explicit_bounds: vec![10.0, 50.0, 100.0, 500.0],
+                                exemplars: vec![],
+                                flags: 0,
+                                min: Some(1.0),
+                                max: Some(1000.0),
+                            }],
+                            aggregation_temporality: AggregationTemporality::Delta as i32,
+                        })),
+                        metadata: vec![],
+                    }],
+                    schema_url: "".to_string(),
+                }],
+                schema_url: "".to_string(),
+            }],
+        };
+
+        let encoded = request.encode_to_vec();
+        let rows = parse_metrics(&encoded, "test-customer").expect("Failed to parse metrics");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].metric_is_monotonic, None, "Histogram should not have is_monotonic");
+        assert_eq!(rows[0].metric_temporality, Some("delta".to_string()), "Histogram should have temporality=delta");
     }
 
     #[test]

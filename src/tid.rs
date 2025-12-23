@@ -569,4 +569,122 @@ mod tests {
         assert!(!should_keep_resource_key("process_pid"));
         assert!(!should_keep_resource_key("custom_label"));
     }
+
+    // =========================================================================
+    // Tests: metric_is_monotonic and metric_temporality are NOT in TID
+    // =========================================================================
+
+    #[test]
+    fn test_tid_does_not_change_with_metric_is_monotonic() {
+        // metric_is_monotonic should NOT affect TID calculation
+        // Even if it were passed, it would be ignored since it doesn't match
+        // the allowed key patterns (metric_name, chq_metric_type, resource_*, attr_*)
+        let tid1 = compute_tid(&[
+            ("metric_name", "test_counter"),
+            ("chq_metric_type", "count"),
+            ("resource_service_name", "server1"),
+        ]);
+        let tid2 = compute_tid(&[
+            ("metric_name", "test_counter"),
+            ("chq_metric_type", "count"),
+            ("resource_service_name", "server1"),
+            ("metric_is_monotonic", "true"),
+        ]);
+        let tid3 = compute_tid(&[
+            ("metric_name", "test_counter"),
+            ("chq_metric_type", "count"),
+            ("resource_service_name", "server1"),
+            ("metric_is_monotonic", "false"),
+        ]);
+        assert_eq!(tid1, tid2, "TID should not change when metric_is_monotonic is added");
+        assert_eq!(tid1, tid3, "TID should not change with different metric_is_monotonic values");
+    }
+
+    #[test]
+    fn test_tid_does_not_change_with_metric_temporality() {
+        // metric_temporality should NOT affect TID calculation
+        // Even if it were passed, it would be ignored since it doesn't match
+        // the allowed key patterns (metric_name, chq_metric_type, resource_*, attr_*)
+        let tid1 = compute_tid(&[
+            ("metric_name", "test_counter"),
+            ("chq_metric_type", "count"),
+            ("resource_service_name", "server1"),
+        ]);
+        let tid2 = compute_tid(&[
+            ("metric_name", "test_counter"),
+            ("chq_metric_type", "count"),
+            ("resource_service_name", "server1"),
+            ("metric_temporality", "delta"),
+        ]);
+        let tid3 = compute_tid(&[
+            ("metric_name", "test_counter"),
+            ("chq_metric_type", "count"),
+            ("resource_service_name", "server1"),
+            ("metric_temporality", "cumulative"),
+        ]);
+        assert_eq!(tid1, tid2, "TID should not change when metric_temporality is added");
+        assert_eq!(tid1, tid3, "TID should not change with different metric_temporality values");
+    }
+
+    #[test]
+    fn test_tid_excludes_aggregation_fields_comprehensive() {
+        // Comprehensive test: TID should be identical regardless of is_monotonic
+        // and temporality combinations
+        let base_tid = compute_tid(&[
+            ("metric_name", "http_requests_total"),
+            ("chq_metric_type", "count"),
+            ("resource_service_name", "api-server"),
+            ("resource_k8s_pod_name", "pod-abc123"),
+            ("attr_http_method", "GET"),
+            ("attr_http_status", "200"),
+        ]);
+
+        // All these should produce the same TID
+        let with_monotonic = compute_tid(&[
+            ("metric_name", "http_requests_total"),
+            ("chq_metric_type", "count"),
+            ("resource_service_name", "api-server"),
+            ("resource_k8s_pod_name", "pod-abc123"),
+            ("attr_http_method", "GET"),
+            ("attr_http_status", "200"),
+            ("metric_is_monotonic", "true"),
+        ]);
+
+        let with_temporality = compute_tid(&[
+            ("metric_name", "http_requests_total"),
+            ("chq_metric_type", "count"),
+            ("resource_service_name", "api-server"),
+            ("resource_k8s_pod_name", "pod-abc123"),
+            ("attr_http_method", "GET"),
+            ("attr_http_status", "200"),
+            ("metric_temporality", "cumulative"),
+        ]);
+
+        let with_both = compute_tid(&[
+            ("metric_name", "http_requests_total"),
+            ("chq_metric_type", "count"),
+            ("resource_service_name", "api-server"),
+            ("resource_k8s_pod_name", "pod-abc123"),
+            ("attr_http_method", "GET"),
+            ("attr_http_status", "200"),
+            ("metric_is_monotonic", "true"),
+            ("metric_temporality", "cumulative"),
+        ]);
+
+        let with_delta = compute_tid(&[
+            ("metric_name", "http_requests_total"),
+            ("chq_metric_type", "count"),
+            ("resource_service_name", "api-server"),
+            ("resource_k8s_pod_name", "pod-abc123"),
+            ("attr_http_method", "GET"),
+            ("attr_http_status", "200"),
+            ("metric_is_monotonic", "false"),
+            ("metric_temporality", "delta"),
+        ]);
+
+        assert_eq!(base_tid, with_monotonic, "metric_is_monotonic should be excluded from TID");
+        assert_eq!(base_tid, with_temporality, "metric_temporality should be excluded from TID");
+        assert_eq!(base_tid, with_both, "Both aggregation fields should be excluded from TID");
+        assert_eq!(base_tid, with_delta, "Different aggregation values should produce same TID");
+    }
 }
