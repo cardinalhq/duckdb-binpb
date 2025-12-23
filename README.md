@@ -58,7 +58,7 @@ GROUP BY metric_name, chq_tid;
 ## Parameters
 
 | Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
+| ----------- | ------ | ---------- | ------------- |
 | File path | VARCHAR | Yes | File path or glob pattern (e.g., `*.binpb.gz`) |
 | `customer_id` | VARCHAR | Yes | Customer identifier for `chq_customer_id` field |
 
@@ -67,7 +67,7 @@ GROUP BY metric_name, chq_tid;
 ### CHQ System Fields
 
 | Column | Type | Description |
-|--------|------|-------------|
+| -------- | ------ | ------------- |
 | `chq_customer_id` | VARCHAR | Customer identifier (from parameter) |
 | `chq_telemetry_type` | VARCHAR | Always "metrics" |
 | `chq_tid` | BIGINT | Telemetry ID (FNV-1a hash for time series identification) |
@@ -77,7 +77,7 @@ GROUP BY metric_name, chq_tid;
 ### Metric Metadata
 
 | Column | Type | Description |
-|--------|------|-------------|
+| -------- | ------ | ------------- |
 | `metric_name` | VARCHAR | Normalized metric name (lowercase, underscores) |
 | `chq_description` | VARCHAR | Metric description |
 | `chq_unit` | VARCHAR | Metric unit (e.g., `%`, `bytes`) |
@@ -88,7 +88,7 @@ GROUP BY metric_name, chq_tid;
 ### Sketch and Rollup Fields
 
 | Column | Type | Description |
-|--------|------|-------------|
+| -------- | ------ | ------------- |
 | `chq_sketch` | BLOB | DDSketch binary (DataDog wire format) |
 | `chq_rollup_avg` | DOUBLE | Average value |
 | `chq_rollup_count` | DOUBLE | Count of values |
@@ -124,7 +124,7 @@ Attributes are flattened into columns with normalized names:
 ## Metric Type Mapping
 
 | OTEL Type | CHQ Type |
-|-----------|----------|
+| ----------- | ---------- |
 | Gauge | `gauge` |
 | Sum | `count` |
 | Histogram | `histogram` |
@@ -134,6 +134,7 @@ Attributes are flattened into columns with normalized names:
 ## TID Calculation
 
 The `chq_tid` field is a 64-bit FNV-1a hash computed from:
+
 - `metric_name`
 - `chq_metric_type`
 - `resource_*` attributes (filtered to allowed keys)
