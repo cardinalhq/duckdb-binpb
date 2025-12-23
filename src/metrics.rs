@@ -132,6 +132,38 @@ fn extract_filtered_datapoint_attrs(attrs: &[KeyValue]) -> Vec<(String, String)>
         .collect()
 }
 
+/// Convert KeyValue slice to owned tuples for TID computation.
+/// Returns raw keys (not normalized/prefixed) since compute_tid_from_otel handles that.
+fn keyvalues_to_owned(attrs: &[KeyValue]) -> Vec<(String, String)> {
+    attrs
+        .iter()
+        .filter_map(|kv| {
+            let value = any_value_to_string(&kv.value);
+            if value.is_empty() {
+                None
+            } else {
+                Some((kv.key.clone(), value))
+            }
+        })
+        .collect()
+}
+
+/// Convert KeyValue slice to owned tuples, filtering underscore-prefixed keys.
+fn keyvalues_to_owned_filtered(attrs: &[KeyValue]) -> Vec<(String, String)> {
+    attrs
+        .iter()
+        .filter(|kv| !kv.key.starts_with('_'))
+        .filter_map(|kv| {
+            let value = any_value_to_string(&kv.value);
+            if value.is_empty() {
+                None
+            } else {
+                Some((kv.key.clone(), value))
+            }
+        })
+        .collect()
+}
+
 /// Convert nanoseconds to milliseconds with 10s truncation
 fn truncate_timestamp(time_unix_nano: u64) -> i64 {
     let ms = (time_unix_nano / 1_000_000) as i64;
@@ -155,6 +187,7 @@ fn create_row_from_number_datapoint(
     customer_id: &str,
     metric: &Metric,
     resource_attrs: &[(String, String)],
+    raw_resource_attrs: &[KeyValue], // Raw OTEL attrs for TID computation
     scope_name: &str,
     scope_version: &str,
     dp_attrs: &[KeyValue],
@@ -166,25 +199,18 @@ fn create_row_from_number_datapoint(
     let normalized_name = normalize_attribute_name(&metric.name);
     let filtered_dp_attrs = extract_filtered_datapoint_attrs(dp_attrs);
 
-    // Build TID input
-    let resource_for_tid: Vec<(&str, &str)> = resource_attrs
+    // Build TID input from raw OTEL attributes (not pre-filtered/prefixed)
+    // compute_tid_from_otel expects raw OTEL keys and applies filtering/prefixing internally
+    let resource_owned = keyvalues_to_owned(raw_resource_attrs);
+    let resource_for_tid: Vec<(&str, &str)> = resource_owned
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    let dp_for_tid: Vec<(&str, &str)> = dp_attrs
+    let dp_owned = keyvalues_to_owned_filtered(dp_attrs);
+    let dp_for_tid: Vec<(&str, &str)> = dp_owned
         .iter()
-        .filter(|kv| !kv.key.starts_with('_'))
-        .filter_map(|kv| {
-            let val = any_value_to_string(&kv.value);
-            if val.is_empty() {
-                None
-            } else {
-                // Leak string to get 'static lifetime for this computation
-                // This is acceptable since we're creating temporary refs
-                Some((kv.key.as_str(), Box::leak(val.into_boxed_str()) as &str))
-            }
-        })
+        .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
     let tid = compute_tid_from_otel(&metric.name, otel_type, &resource_for_tid, &dp_for_tid);
@@ -229,6 +255,7 @@ fn create_row_from_histogram(
     customer_id: &str,
     metric: &Metric,
     resource_attrs: &[(String, String)],
+    raw_resource_attrs: &[KeyValue], // Raw OTEL attrs for TID computation
     scope_name: &str,
     scope_version: &str,
     dp: &crate::opentelemetry::proto::metrics::v1::HistogramDataPoint,
@@ -236,24 +263,17 @@ fn create_row_from_histogram(
     let normalized_name = normalize_attribute_name(&metric.name);
     let filtered_dp_attrs = extract_filtered_datapoint_attrs(&dp.attributes);
 
-    // Build TID
-    let resource_for_tid: Vec<(&str, &str)> = resource_attrs
+    // Build TID from raw OTEL attributes
+    let resource_owned = keyvalues_to_owned(raw_resource_attrs);
+    let resource_for_tid: Vec<(&str, &str)> = resource_owned
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    let dp_for_tid: Vec<(&str, &str)> = dp
-        .attributes
+    let dp_owned = keyvalues_to_owned_filtered(&dp.attributes);
+    let dp_for_tid: Vec<(&str, &str)> = dp_owned
         .iter()
-        .filter(|kv| !kv.key.starts_with('_'))
-        .filter_map(|kv| {
-            let val = any_value_to_string(&kv.value);
-            if val.is_empty() {
-                None
-            } else {
-                Some((kv.key.as_str(), Box::leak(val.into_boxed_str()) as &str))
-            }
-        })
+        .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
     let tid = compute_tid_from_otel(&metric.name, "histogram", &resource_for_tid, &dp_for_tid);
@@ -310,6 +330,7 @@ fn create_row_from_exp_histogram(
     customer_id: &str,
     metric: &Metric,
     resource_attrs: &[(String, String)],
+    raw_resource_attrs: &[KeyValue], // Raw OTEL attrs for TID computation
     scope_name: &str,
     scope_version: &str,
     dp: &crate::opentelemetry::proto::metrics::v1::ExponentialHistogramDataPoint,
@@ -317,23 +338,17 @@ fn create_row_from_exp_histogram(
     let normalized_name = normalize_attribute_name(&metric.name);
     let filtered_dp_attrs = extract_filtered_datapoint_attrs(&dp.attributes);
 
-    let resource_for_tid: Vec<(&str, &str)> = resource_attrs
+    // Build TID from raw OTEL attributes
+    let resource_owned = keyvalues_to_owned(raw_resource_attrs);
+    let resource_for_tid: Vec<(&str, &str)> = resource_owned
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    let dp_for_tid: Vec<(&str, &str)> = dp
-        .attributes
+    let dp_owned = keyvalues_to_owned_filtered(&dp.attributes);
+    let dp_for_tid: Vec<(&str, &str)> = dp_owned
         .iter()
-        .filter(|kv| !kv.key.starts_with('_'))
-        .filter_map(|kv| {
-            let val = any_value_to_string(&kv.value);
-            if val.is_empty() {
-                None
-            } else {
-                Some((kv.key.as_str(), Box::leak(val.into_boxed_str()) as &str))
-            }
-        })
+        .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
     let tid = compute_tid_from_otel(
@@ -399,6 +414,7 @@ fn create_row_from_summary(
     customer_id: &str,
     metric: &Metric,
     resource_attrs: &[(String, String)],
+    raw_resource_attrs: &[KeyValue], // Raw OTEL attrs for TID computation
     scope_name: &str,
     scope_version: &str,
     dp: &crate::opentelemetry::proto::metrics::v1::SummaryDataPoint,
@@ -406,23 +422,17 @@ fn create_row_from_summary(
     let normalized_name = normalize_attribute_name(&metric.name);
     let filtered_dp_attrs = extract_filtered_datapoint_attrs(&dp.attributes);
 
-    let resource_for_tid: Vec<(&str, &str)> = resource_attrs
+    // Build TID from raw OTEL attributes
+    let resource_owned = keyvalues_to_owned(raw_resource_attrs);
+    let resource_for_tid: Vec<(&str, &str)> = resource_owned
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    let dp_for_tid: Vec<(&str, &str)> = dp
-        .attributes
+    let dp_owned = keyvalues_to_owned_filtered(&dp.attributes);
+    let dp_for_tid: Vec<(&str, &str)> = dp_owned
         .iter()
-        .filter(|kv| !kv.key.starts_with('_'))
-        .filter_map(|kv| {
-            let val = any_value_to_string(&kv.value);
-            if val.is_empty() {
-                None
-            } else {
-                Some((kv.key.as_str(), Box::leak(val.into_boxed_str()) as &str))
-            }
-        })
+        .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
     let tid = compute_tid_from_otel(&metric.name, "summary", &resource_for_tid, &dp_for_tid);
@@ -479,6 +489,14 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
     let mut rows = Vec::new();
 
     for rm in &request.resource_metrics {
+        // Get raw resource attributes for TID computation
+        let raw_resource_attrs: &[KeyValue] = rm
+            .resource
+            .as_ref()
+            .map(|r| r.attributes.as_slice())
+            .unwrap_or(&[]);
+
+        // Get filtered/prefixed resource attributes for output columns
         let resource_attrs = rm
             .resource
             .as_ref()
@@ -509,6 +527,7 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
                                 customer_id,
                                 metric,
                                 &resource_attrs,
+                                raw_resource_attrs,
                                 &scope_name,
                                 &scope_version,
                                 &dp.attributes,
@@ -532,6 +551,7 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
                                 customer_id,
                                 metric,
                                 &resource_attrs,
+                                raw_resource_attrs,
                                 &scope_name,
                                 &scope_version,
                                 &dp.attributes,
@@ -546,6 +566,7 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
                                 customer_id,
                                 metric,
                                 &resource_attrs,
+                                raw_resource_attrs,
                                 &scope_name,
                                 &scope_version,
                                 dp,
@@ -558,6 +579,7 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
                                 customer_id,
                                 metric,
                                 &resource_attrs,
+                                raw_resource_attrs,
                                 &scope_name,
                                 &scope_version,
                                 dp,
@@ -570,6 +592,7 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
                                 customer_id,
                                 metric,
                                 &resource_attrs,
+                                raw_resource_attrs,
                                 &scope_name,
                                 &scope_version,
                                 dp,

@@ -511,6 +511,43 @@ mod tests {
         assert_eq!(tid, expected);
     }
 
+    /// Cross-validation with Go implementation.
+    /// These test cases match TestTID_CrossValidation_WithRust in Go.
+    #[test]
+    fn test_tid_cross_validation_with_go() {
+        // Test 1: simple gauge metric
+        // Go hash input: "chq_metric_type=gauge|metric_name=test_metric|resource_service_name=my-service|"
+        // Go TID: 4261145125547256768 (0x3b22a0ea48a1abc0)
+        let tid1 = compute_tid(&[
+            ("chq_metric_type", "gauge"),
+            ("metric_name", "test_metric"),
+            ("resource_service_name", "my-service"),
+        ]);
+        println!("Test 1 (simple gauge): TID={} (0x{:x})", tid1, tid1 as u64);
+        assert_eq!(
+            tid1, 4261145125547256768,
+            "simple gauge metric TID must match Go"
+        );
+
+        // Test 2: count metric with attributes
+        // Go hash input: "attr_http_method=GET|attr_http_status=200|chq_metric_type=count|metric_name=http_server_requests|resource_k8s_pod_name=pod-123|resource_service_name=my-service|resource_service_version=1.0.0|"
+        // Go TID: -7350676297560190200 (0x99fd26da590a9308)
+        let tid2 = compute_tid(&[
+            ("attr_http_method", "GET"),
+            ("attr_http_status", "200"),
+            ("chq_metric_type", "count"),
+            ("metric_name", "http_server_requests"),
+            ("resource_k8s_pod_name", "pod-123"),
+            ("resource_service_name", "my-service"),
+            ("resource_service_version", "1.0.0"),
+        ]);
+        println!("Test 2 (count with attrs): TID={} (0x{:x})", tid2, tid2 as u64);
+        assert_eq!(
+            tid2, -7350676297560190200_i64,
+            "count metric with attributes TID must match Go"
+        );
+    }
+
     #[test]
     fn test_keep_resource_keys() {
         // Verify all expected keys are in the list
