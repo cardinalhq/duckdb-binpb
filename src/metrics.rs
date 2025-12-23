@@ -182,6 +182,35 @@ fn otel_metric_type(metric: &Metric) -> &'static str {
     }
 }
 
+/// Check if a histogram datapoint has any non-zero bucket counts.
+/// Returns false if all bucket counts are zero (empty histogram).
+fn histogram_has_counts(
+    dp: &crate::opentelemetry::proto::metrics::v1::HistogramDataPoint,
+) -> bool {
+    dp.bucket_counts.iter().any(|&count| count > 0)
+}
+
+/// Check if an exponential histogram datapoint has any non-zero bucket counts.
+/// Returns false if all bucket counts are zero (empty histogram).
+fn exp_histogram_has_counts(
+    dp: &crate::opentelemetry::proto::metrics::v1::ExponentialHistogramDataPoint,
+) -> bool {
+    // Check positive buckets
+    if let Some(pos) = &dp.positive {
+        if pos.bucket_counts.iter().any(|&count| count > 0) {
+            return true;
+        }
+    }
+    // Check negative buckets
+    if let Some(neg) = &dp.negative {
+        if neg.bucket_counts.iter().any(|&count| count > 0) {
+            return true;
+        }
+    }
+    // Check zero count
+    dp.zero_count > 0
+}
+
 /// Create row from a gauge/sum data point
 fn create_row_from_number_datapoint(
     customer_id: &str,
@@ -562,6 +591,10 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
                     }
                     Some(metric::Data::Histogram(hist)) => {
                         for dp in &hist.data_points {
+                            // Skip histograms with all-zero bucket counts (matches Go behavior)
+                            if !histogram_has_counts(dp) {
+                                continue;
+                            }
                             rows.push(create_row_from_histogram(
                                 customer_id,
                                 metric,
@@ -575,6 +608,10 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
                     }
                     Some(metric::Data::ExponentialHistogram(exp_hist)) => {
                         for dp in &exp_hist.data_points {
+                            // Skip exponential histograms with no counts (matches Go behavior)
+                            if !exp_histogram_has_counts(dp) {
+                                continue;
+                            }
                             rows.push(create_row_from_exp_histogram(
                                 customer_id,
                                 metric,
@@ -1272,5 +1309,178 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].chq_metric_type, "histogram"); // Summary -> histogram
         assert_eq!(rows[0].chq_rollup_sum, 50000.0);
+    }
+
+    #[test]
+    fn test_empty_histogram_filtered() {
+        // Empty histograms (all bucket counts = 0) should be dropped to match Go behavior
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(Resource {
+                    attributes: vec![KeyValue {
+                        key: "service.name".to_string(),
+                        value: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue("test-service".to_string())),
+                        }),
+                    }],
+                    dropped_attributes_count: 0,
+                    entity_refs: vec![],
+                }),
+                scope_metrics: vec![ScopeMetrics {
+                    scope: None,
+                    metrics: vec![Metric {
+                        name: "http.server.duration".to_string(),
+                        description: "HTTP server request duration".to_string(),
+                        unit: "ms".to_string(),
+                        data: Some(metric::Data::Histogram(Histogram {
+                            aggregation_temporality: 2, // Cumulative
+                            data_points: vec![
+                                // This datapoint has counts - should be kept
+                                HistogramDataPoint {
+                                    attributes: vec![KeyValue {
+                                        key: "http.status_code".to_string(),
+                                        value: Some(AnyValue {
+                                            value: Some(any_value::Value::IntValue(200)),
+                                        }),
+                                    }],
+                                    start_time_unix_nano: 0,
+                                    time_unix_nano: 1700000000_000_000_000,
+                                    count: 100,
+                                    sum: Some(5000.0),
+                                    bucket_counts: vec![10, 30, 40, 15, 5],
+                                    explicit_bounds: vec![10.0, 50.0, 100.0, 500.0],
+                                    exemplars: vec![],
+                                    flags: 0,
+                                    min: Some(1.0),
+                                    max: Some(1000.0),
+                                },
+                                // This datapoint has all-zero counts - should be dropped
+                                HistogramDataPoint {
+                                    attributes: vec![KeyValue {
+                                        key: "http.status_code".to_string(),
+                                        value: Some(AnyValue {
+                                            value: Some(any_value::Value::IntValue(500)),
+                                        }),
+                                    }],
+                                    start_time_unix_nano: 0,
+                                    time_unix_nano: 1700000000_000_000_000,
+                                    count: 0,
+                                    sum: Some(0.0),
+                                    bucket_counts: vec![0, 0, 0, 0, 0], // All zeros
+                                    explicit_bounds: vec![10.0, 50.0, 100.0, 500.0],
+                                    exemplars: vec![],
+                                    flags: 0,
+                                    min: None,
+                                    max: None,
+                                },
+                            ],
+                        })),
+                        metadata: vec![],
+                    }],
+                    schema_url: "".to_string(),
+                }],
+                schema_url: "".to_string(),
+            }],
+        };
+
+        let encoded = request.encode_to_vec();
+        let rows = parse_metrics(&encoded, "test-customer").expect("Failed to parse metrics");
+
+        // Should only have 1 row (the one with counts), not 2
+        assert_eq!(rows.len(), 1, "Empty histogram should be filtered out");
+        assert_eq!(rows[0].metric_name, "http_server_duration");
+        // rollup_count is computed from DDSketch, not the original count
+        assert!(rows[0].chq_rollup_count > 0.0, "rollup_count should be positive");
+    }
+
+    #[test]
+    fn test_empty_exp_histogram_filtered() {
+        use crate::opentelemetry::proto::metrics::v1::{
+            ExponentialHistogram, ExponentialHistogramDataPoint,
+        };
+
+        // Empty exponential histograms should also be dropped
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(Resource {
+                    attributes: vec![KeyValue {
+                        key: "service.name".to_string(),
+                        value: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue("test-service".to_string())),
+                        }),
+                    }],
+                    dropped_attributes_count: 0,
+                    entity_refs: vec![],
+                }),
+                scope_metrics: vec![ScopeMetrics {
+                    scope: None,
+                    metrics: vec![Metric {
+                        name: "request.latency".to_string(),
+                        description: "Request latency".to_string(),
+                        unit: "ms".to_string(),
+                        data: Some(metric::Data::ExponentialHistogram(ExponentialHistogram {
+                            aggregation_temporality: 2,
+                            data_points: vec![
+                                // This datapoint has positive bucket counts - should be kept
+                                ExponentialHistogramDataPoint {
+                                    attributes: vec![],
+                                    start_time_unix_nano: 0,
+                                    time_unix_nano: 1700000000_000_000_000,
+                                    count: 50,
+                                    sum: Some(2500.0),
+                                    scale: 3,
+                                    zero_count: 0,
+                                    positive: Some(
+                                        crate::opentelemetry::proto::metrics::v1::exponential_histogram_data_point::Buckets {
+                                            offset: 0,
+                                            bucket_counts: vec![10, 20, 15, 5],
+                                        },
+                                    ),
+                                    negative: None,
+                                    flags: 0,
+                                    exemplars: vec![],
+                                    min: Some(10.0),
+                                    max: Some(200.0),
+                                    zero_threshold: 0.0,
+                                },
+                                // This datapoint has no counts at all - should be dropped
+                                ExponentialHistogramDataPoint {
+                                    attributes: vec![],
+                                    start_time_unix_nano: 0,
+                                    time_unix_nano: 1700000000_000_000_000,
+                                    count: 0,
+                                    sum: Some(0.0),
+                                    scale: 3,
+                                    zero_count: 0, // No zero count
+                                    positive: Some(
+                                        crate::opentelemetry::proto::metrics::v1::exponential_histogram_data_point::Buckets {
+                                            offset: 0,
+                                            bucket_counts: vec![0, 0, 0, 0], // All zeros
+                                        },
+                                    ),
+                                    negative: None,
+                                    flags: 0,
+                                    exemplars: vec![],
+                                    min: None,
+                                    max: None,
+                                    zero_threshold: 0.0,
+                                },
+                            ],
+                        })),
+                        metadata: vec![],
+                    }],
+                    schema_url: "".to_string(),
+                }],
+                schema_url: "".to_string(),
+            }],
+        };
+
+        let encoded = request.encode_to_vec();
+        let rows = parse_metrics(&encoded, "test-customer").expect("Failed to parse metrics");
+
+        // Should only have 1 row (the one with counts), not 2
+        assert_eq!(rows.len(), 1, "Empty exponential histogram should be filtered out");
+        assert_eq!(rows[0].metric_name, "request_latency");
+        assert_eq!(rows[0].chq_rollup_count, 50.0);
     }
 }
