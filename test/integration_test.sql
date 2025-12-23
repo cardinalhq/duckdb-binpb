@@ -8,54 +8,77 @@ LOAD 'build/release/otel_metrics.duckdb_extension';
 
 -- Test 1: Read uncompressed binpb file
 SELECT '=== Test 1: Read uncompressed binpb ===' as test;
-SELECT * FROM otel_metrics_read('test/data/test_metrics.binpb');
+SELECT count(*) as row_count FROM otel_metrics_read('test/data/test_metrics.binpb', customer_id='test');
 
 -- Test 2: Read gzipped binpb file
 SELECT '=== Test 2: Read gzipped binpb ===' as test;
-SELECT * FROM otel_metrics_read('test/data/test_metrics.binpb.gz');
+SELECT count(*) as row_count FROM otel_metrics_read('test/data/test_metrics.binpb.gz', customer_id='test');
 
--- Test 3: Verify row count
-SELECT '=== Test 3: Verify row count ===' as test;
-SELECT count(*) as row_count FROM otel_metrics_read('test/data/test_metrics.binpb');
-
--- Test 4: Query specific columns
-SELECT '=== Test 4: Query specific columns ===' as test;
+-- Test 3: Verify CHQ schema columns exist
+SELECT '=== Test 3: Verify CHQ schema ===' as test;
 SELECT
+    chq_customer_id,
+    chq_telemetry_type,
+    chq_tid,
+    chq_timestamp,
+    chq_tsns,
     metric_name,
-    metric_type,
-    value_int,
-    value_double
-FROM otel_metrics_read('test/data/test_metrics.binpb');
-
--- Test 5: Verify resource attributes are normalized
-SELECT '=== Test 5: Verify resource attributes ===' as test;
-SELECT
-    metric_name,
-    resource_service_name,
-    resource_host_name,
-    resource_k8s_pod_name
-FROM otel_metrics_read('test/data/test_metrics.binpb')
+    chq_metric_type
+FROM otel_metrics_read('test/data/test_metrics.binpb', customer_id='integration-test')
 LIMIT 1;
 
--- Test 6: Filter by metric type
-SELECT '=== Test 6: Filter by metric type ===' as test;
+-- Test 4: Verify rollup fields
+SELECT '=== Test 4: Verify rollup fields ===' as test;
 SELECT
     metric_name,
-    metric_type,
-    is_monotonic,
-    aggregation_temporality
-FROM otel_metrics_read('test/data/test_metrics.binpb')
-WHERE metric_type = 'sum';
+    chq_rollup_count,
+    chq_rollup_sum,
+    chq_rollup_min,
+    chq_rollup_max,
+    chq_rollup_avg
+FROM otel_metrics_read('test/data/test_metrics.binpb', customer_id='test')
+LIMIT 2;
 
--- Test 7: Aggregate query
-SELECT '=== Test 7: Aggregate query ===' as test;
+-- Test 5: Verify sketch is populated
+SELECT '=== Test 5: Verify sketch ===' as test;
 SELECT
     metric_name,
-    count(*) as point_count,
-    sum(value_int) as total_int,
-    avg(value_double) as avg_double
-FROM otel_metrics_read('test/data/test_metrics.binpb')
-GROUP BY metric_name
-ORDER BY metric_name;
+    octet_length(chq_sketch) as sketch_bytes
+FROM otel_metrics_read('test/data/test_metrics.binpb', customer_id='test')
+LIMIT 2;
+
+-- Test 6: Read glob pattern (testdata files)
+SELECT '=== Test 6: Read glob pattern ===' as test;
+SELECT count(*) as total_rows FROM otel_metrics_read('testdata/metrics_*.binpb.gz', customer_id='glob-test');
+
+-- Test 7: Write to parquet with ZSTD compression
+SELECT '=== Test 7: Write parquet with ZSTD ===' as test;
+COPY (
+    SELECT * FROM otel_metrics_read('testdata/metrics_*.binpb.gz', customer_id='parquet-test')
+    ORDER BY metric_name, chq_tid, chq_timestamp
+) TO '/tmp/integration_test_output.parquet' (FORMAT PARQUET, COMPRESSION ZSTD);
+
+-- Verify parquet was written correctly
+SELECT count(*) as parquet_rows FROM '/tmp/integration_test_output.parquet';
+
+-- Test 8: Aggregate by metric type
+SELECT '=== Test 8: Aggregate by metric type ===' as test;
+SELECT
+    chq_metric_type,
+    count(*) as count
+FROM otel_metrics_read('testdata/metrics_*.binpb.gz', customer_id='test')
+GROUP BY chq_metric_type
+ORDER BY chq_metric_type;
+
+-- Test 9: Verify TID is consistent for same time series
+SELECT '=== Test 9: TID consistency ===' as test;
+SELECT
+    metric_name,
+    chq_tid,
+    count(*) as points
+FROM otel_metrics_read('testdata/metrics_*.binpb.gz', customer_id='test')
+GROUP BY metric_name, chq_tid
+ORDER BY points DESC
+LIMIT 5;
 
 SELECT '=== All tests passed! ===' as result;

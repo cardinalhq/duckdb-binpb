@@ -43,7 +43,7 @@ WHERE chq_metric_type = 'gauge';
 COPY (
     SELECT * FROM otel_metrics_read('testdata/*.binpb.gz', customer_id='prod')
     ORDER BY metric_name, chq_tid, chq_timestamp
-) TO 'output.parquet' (FORMAT PARQUET);
+) TO 'output.parquet' (FORMAT PARQUET, COMPRESSION ZSTD);
 
 -- Aggregate metrics by time series
 SELECT
