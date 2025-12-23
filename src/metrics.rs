@@ -23,6 +23,7 @@ use duckdb::{
 use prost::Message;
 use std::{
     error::Error,
+    sync::Arc,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -85,7 +86,7 @@ pub struct MetricRow {
     pub chq_rollup_p99: f64,
 
     // Dynamic attributes
-    pub resource_attrs: Vec<(String, String)>, // Filtered to allowed keys
+    pub resource_attrs: Arc<Vec<(String, String)>>, // Filtered to allowed keys (shared across rows)
     pub datapoint_attrs: Vec<(String, String)>, // Filtered (no underscore-prefix, no empty)
 }
 
@@ -113,23 +114,27 @@ fn extract_filtered_resource_attrs(attrs: &[KeyValue]) -> Vec<(String, String)> 
         .collect()
 }
 
-/// Extract datapoint attributes, filtering out underscore-prefixed and empty values
-fn extract_filtered_datapoint_attrs(attrs: &[KeyValue]) -> Vec<(String, String)> {
-    attrs
-        .iter()
-        .filter_map(|kv| {
-            // Skip underscore-prefixed keys
-            if kv.key.starts_with('_') {
-                return None;
-            }
-            let value = any_value_to_string(&kv.value);
-            if value.is_empty() {
-                return None;
-            }
-            let normalized_key = normalize_attribute_name(&kv.key);
-            Some((format!("attr_{}", normalized_key), value))
-        })
-        .collect()
+/// Extract datapoint attributes, filtering out underscore-prefixed and empty values.
+/// Returns (prefixed_attrs_for_output, raw_attrs_for_tid)
+fn extract_datapoint_attrs_both(attrs: &[KeyValue]) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    let mut prefixed = Vec::with_capacity(attrs.len());
+    let mut raw = Vec::with_capacity(attrs.len());
+
+    for kv in attrs {
+        // Skip underscore-prefixed keys
+        if kv.key.starts_with('_') {
+            continue;
+        }
+        let value = any_value_to_string(&kv.value);
+        if value.is_empty() {
+            continue;
+        }
+        let normalized_key = normalize_attribute_name(&kv.key);
+        prefixed.push((format!("attr_{}", normalized_key), value.clone()));
+        raw.push((kv.key.clone(), value));
+    }
+
+    (prefixed, raw)
 }
 
 /// Convert KeyValue slice to owned tuples for TID computation.
@@ -137,22 +142,6 @@ fn extract_filtered_datapoint_attrs(attrs: &[KeyValue]) -> Vec<(String, String)>
 fn keyvalues_to_owned(attrs: &[KeyValue]) -> Vec<(String, String)> {
     attrs
         .iter()
-        .filter_map(|kv| {
-            let value = any_value_to_string(&kv.value);
-            if value.is_empty() {
-                None
-            } else {
-                Some((kv.key.clone(), value))
-            }
-        })
-        .collect()
-}
-
-/// Convert KeyValue slice to owned tuples, filtering underscore-prefixed keys.
-fn keyvalues_to_owned_filtered(attrs: &[KeyValue]) -> Vec<(String, String)> {
-    attrs
-        .iter()
-        .filter(|kv| !kv.key.starts_with('_'))
         .filter_map(|kv| {
             let value = any_value_to_string(&kv.value);
             if value.is_empty() {
@@ -215,8 +204,8 @@ fn exp_histogram_has_counts(
 fn create_row_from_number_datapoint(
     customer_id: &str,
     metric: &Metric,
-    resource_attrs: &[(String, String)],
-    raw_resource_attrs: &[KeyValue], // Raw OTEL attrs for TID computation
+    resource_attrs: &Arc<Vec<(String, String)>>,
+    raw_resource_for_tid: &[(&str, &str)], // Pre-computed raw resource attrs for TID
     scope_name: &str,
     scope_version: &str,
     dp_attrs: &[KeyValue],
@@ -226,23 +215,15 @@ fn create_row_from_number_datapoint(
     let otel_type = otel_metric_type(metric);
     let chq_type = metric_type_to_string(otel_type);
     let normalized_name = normalize_attribute_name(&metric.name);
-    let filtered_dp_attrs = extract_filtered_datapoint_attrs(dp_attrs);
 
-    // Build TID input from raw OTEL attributes (not pre-filtered/prefixed)
-    // compute_tid_from_otel expects raw OTEL keys and applies filtering/prefixing internally
-    let resource_owned = keyvalues_to_owned(raw_resource_attrs);
-    let resource_for_tid: Vec<(&str, &str)> = resource_owned
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-
-    let dp_owned = keyvalues_to_owned_filtered(dp_attrs);
+    // Process datapoint attrs once for both output and TID
+    let (filtered_dp_attrs, dp_owned) = extract_datapoint_attrs_both(dp_attrs);
     let dp_for_tid: Vec<(&str, &str)> = dp_owned
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    let tid = compute_tid_from_otel(&metric.name, otel_type, &resource_for_tid, &dp_for_tid);
+    let tid = compute_tid_from_otel(&metric.name, otel_type, raw_resource_for_tid, &dp_for_tid);
 
     // Create sketch from single value
     let mut sketch = DDSketch::default();
@@ -274,7 +255,7 @@ fn create_row_from_number_datapoint(
         chq_rollup_p90: stats.p90,
         chq_rollup_p95: stats.p95,
         chq_rollup_p99: stats.p99,
-        resource_attrs: resource_attrs.to_vec(),
+        resource_attrs: Arc::clone(resource_attrs),
         datapoint_attrs: filtered_dp_attrs,
     }
 }
@@ -283,29 +264,22 @@ fn create_row_from_number_datapoint(
 fn create_row_from_histogram(
     customer_id: &str,
     metric: &Metric,
-    resource_attrs: &[(String, String)],
-    raw_resource_attrs: &[KeyValue], // Raw OTEL attrs for TID computation
+    resource_attrs: &Arc<Vec<(String, String)>>,
+    raw_resource_for_tid: &[(&str, &str)], // Pre-computed raw resource attrs for TID
     scope_name: &str,
     scope_version: &str,
     dp: &crate::opentelemetry::proto::metrics::v1::HistogramDataPoint,
 ) -> MetricRow {
     let normalized_name = normalize_attribute_name(&metric.name);
-    let filtered_dp_attrs = extract_filtered_datapoint_attrs(&dp.attributes);
 
-    // Build TID from raw OTEL attributes
-    let resource_owned = keyvalues_to_owned(raw_resource_attrs);
-    let resource_for_tid: Vec<(&str, &str)> = resource_owned
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-
-    let dp_owned = keyvalues_to_owned_filtered(&dp.attributes);
+    // Process datapoint attrs once for both output and TID
+    let (filtered_dp_attrs, dp_owned) = extract_datapoint_attrs_both(&dp.attributes);
     let dp_for_tid: Vec<(&str, &str)> = dp_owned
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    let tid = compute_tid_from_otel(&metric.name, "histogram", &resource_for_tid, &dp_for_tid);
+    let tid = compute_tid_from_otel(&metric.name, "histogram", raw_resource_for_tid, &dp_for_tid);
 
     // Convert histogram buckets to sketch
     let buckets: Vec<HistogramBucket> = dp
@@ -349,7 +323,7 @@ fn create_row_from_histogram(
         chq_rollup_p90: stats.p90,
         chq_rollup_p95: stats.p95,
         chq_rollup_p99: stats.p99,
-        resource_attrs: resource_attrs.to_vec(),
+        resource_attrs: Arc::clone(resource_attrs),
         datapoint_attrs: filtered_dp_attrs,
     }
 }
@@ -358,23 +332,16 @@ fn create_row_from_histogram(
 fn create_row_from_exp_histogram(
     customer_id: &str,
     metric: &Metric,
-    resource_attrs: &[(String, String)],
-    raw_resource_attrs: &[KeyValue], // Raw OTEL attrs for TID computation
+    resource_attrs: &Arc<Vec<(String, String)>>,
+    raw_resource_for_tid: &[(&str, &str)], // Pre-computed raw resource attrs for TID
     scope_name: &str,
     scope_version: &str,
     dp: &crate::opentelemetry::proto::metrics::v1::ExponentialHistogramDataPoint,
 ) -> MetricRow {
     let normalized_name = normalize_attribute_name(&metric.name);
-    let filtered_dp_attrs = extract_filtered_datapoint_attrs(&dp.attributes);
 
-    // Build TID from raw OTEL attributes
-    let resource_owned = keyvalues_to_owned(raw_resource_attrs);
-    let resource_for_tid: Vec<(&str, &str)> = resource_owned
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-
-    let dp_owned = keyvalues_to_owned_filtered(&dp.attributes);
+    // Process datapoint attrs once for both output and TID
+    let (filtered_dp_attrs, dp_owned) = extract_datapoint_attrs_both(&dp.attributes);
     let dp_for_tid: Vec<(&str, &str)> = dp_owned
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -383,7 +350,7 @@ fn create_row_from_exp_histogram(
     let tid = compute_tid_from_otel(
         &metric.name,
         "exponential_histogram",
-        &resource_for_tid,
+        raw_resource_for_tid,
         &dp_for_tid,
     );
 
@@ -433,7 +400,7 @@ fn create_row_from_exp_histogram(
         chq_rollup_p90: stats.p90,
         chq_rollup_p95: stats.p95,
         chq_rollup_p99: stats.p99,
-        resource_attrs: resource_attrs.to_vec(),
+        resource_attrs: Arc::clone(resource_attrs),
         datapoint_attrs: filtered_dp_attrs,
     }
 }
@@ -442,29 +409,22 @@ fn create_row_from_exp_histogram(
 fn create_row_from_summary(
     customer_id: &str,
     metric: &Metric,
-    resource_attrs: &[(String, String)],
-    raw_resource_attrs: &[KeyValue], // Raw OTEL attrs for TID computation
+    resource_attrs: &Arc<Vec<(String, String)>>,
+    raw_resource_for_tid: &[(&str, &str)], // Pre-computed raw resource attrs for TID
     scope_name: &str,
     scope_version: &str,
     dp: &crate::opentelemetry::proto::metrics::v1::SummaryDataPoint,
 ) -> MetricRow {
     let normalized_name = normalize_attribute_name(&metric.name);
-    let filtered_dp_attrs = extract_filtered_datapoint_attrs(&dp.attributes);
 
-    // Build TID from raw OTEL attributes
-    let resource_owned = keyvalues_to_owned(raw_resource_attrs);
-    let resource_for_tid: Vec<(&str, &str)> = resource_owned
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-
-    let dp_owned = keyvalues_to_owned_filtered(&dp.attributes);
+    // Process datapoint attrs once for both output and TID
+    let (filtered_dp_attrs, dp_owned) = extract_datapoint_attrs_both(&dp.attributes);
     let dp_for_tid: Vec<(&str, &str)> = dp_owned
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
 
-    let tid = compute_tid_from_otel(&metric.name, "summary", &resource_for_tid, &dp_for_tid);
+    let tid = compute_tid_from_otel(&metric.name, "summary", raw_resource_for_tid, &dp_for_tid);
 
     let quantiles: Vec<SummaryQuantile> = dp
         .quantile_values
@@ -503,7 +463,7 @@ fn create_row_from_summary(
         chq_rollup_p90: stats.p90,
         chq_rollup_p95: stats.p95,
         chq_rollup_p99: stats.p99,
-        resource_attrs: resource_attrs.to_vec(),
+        resource_attrs: Arc::clone(resource_attrs),
         datapoint_attrs: filtered_dp_attrs,
     }
 }
@@ -518,19 +478,23 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
     let mut rows = Vec::new();
 
     for rm in &request.resource_metrics {
-        // Get raw resource attributes for TID computation
-        let raw_resource_attrs: &[KeyValue] = rm
-            .resource
-            .as_ref()
-            .map(|r| r.attributes.as_slice())
-            .unwrap_or(&[]);
-
-        // Get filtered/prefixed resource attributes for output columns
-        let resource_attrs = rm
+        // Get filtered/prefixed resource attributes for output columns (wrapped in Arc for sharing)
+        let resource_attrs = Arc::new(rm
             .resource
             .as_ref()
             .map(|r| extract_filtered_resource_attrs(&r.attributes))
+            .unwrap_or_default());
+
+        // Pre-compute raw resource attributes for TID computation (once per ResourceMetrics)
+        let raw_resource_owned: Vec<(String, String)> = rm
+            .resource
+            .as_ref()
+            .map(|r| keyvalues_to_owned(&r.attributes))
             .unwrap_or_default();
+        let raw_resource_for_tid: Vec<(&str, &str)> = raw_resource_owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
 
         for sm in &rm.scope_metrics {
             let (scope_name, scope_version) = sm
@@ -556,7 +520,7 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
                                 customer_id,
                                 metric,
                                 &resource_attrs,
-                                raw_resource_attrs,
+                                &raw_resource_for_tid,
                                 &scope_name,
                                 &scope_version,
                                 &dp.attributes,
@@ -580,7 +544,7 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
                                 customer_id,
                                 metric,
                                 &resource_attrs,
-                                raw_resource_attrs,
+                                &raw_resource_for_tid,
                                 &scope_name,
                                 &scope_version,
                                 &dp.attributes,
@@ -599,7 +563,7 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
                                 customer_id,
                                 metric,
                                 &resource_attrs,
-                                raw_resource_attrs,
+                                &raw_resource_for_tid,
                                 &scope_name,
                                 &scope_version,
                                 dp,
@@ -616,7 +580,7 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
                                 customer_id,
                                 metric,
                                 &resource_attrs,
-                                raw_resource_attrs,
+                                &raw_resource_for_tid,
                                 &scope_name,
                                 &scope_version,
                                 dp,
@@ -629,7 +593,7 @@ pub fn parse_metrics(data: &[u8], customer_id: &str) -> Result<Vec<MetricRow>, B
                                 customer_id,
                                 metric,
                                 &resource_attrs,
-                                raw_resource_attrs,
+                                &raw_resource_for_tid,
                                 &scope_name,
                                 &scope_version,
                                 dp,
@@ -933,21 +897,22 @@ impl VTab for ReadMetricsVTab {
 
 /// Collect all unique attribute names from rows
 fn collect_attr_names(rows: &[MetricRow]) -> (Vec<String>, Vec<String>) {
-    let mut resource_attr_names: Vec<String> = Vec::new();
-    let mut datapoint_attr_names: Vec<String> = Vec::new();
+    use std::collections::HashSet;
+
+    let mut resource_attr_set: HashSet<String> = HashSet::new();
+    let mut datapoint_attr_set: HashSet<String> = HashSet::new();
 
     for row in rows {
-        for (key, _) in &row.resource_attrs {
-            if !resource_attr_names.contains(key) {
-                resource_attr_names.push(key.clone());
-            }
+        for (key, _) in row.resource_attrs.iter() {
+            resource_attr_set.insert(key.clone());
         }
         for (key, _) in &row.datapoint_attrs {
-            if !datapoint_attr_names.contains(key) {
-                datapoint_attr_names.push(key.clone());
-            }
+            datapoint_attr_set.insert(key.clone());
         }
     }
+
+    let mut resource_attr_names: Vec<String> = resource_attr_set.into_iter().collect();
+    let mut datapoint_attr_names: Vec<String> = datapoint_attr_set.into_iter().collect();
 
     resource_attr_names.sort();
     datapoint_attr_names.sort();
