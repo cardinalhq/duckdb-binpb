@@ -22,10 +22,12 @@ extern crate duckdb;
 extern crate libduckdb_sys;
 
 pub mod common;
+pub mod logs;
 pub mod metrics;
 pub mod normalize;
 pub mod sketch;
 pub mod tid;
+pub mod traces;
 
 // Include generated protobuf code
 pub mod opentelemetry {
@@ -45,10 +47,30 @@ pub mod opentelemetry {
                 include!("opentelemetry.proto.metrics.v1.rs");
             }
         }
+        pub mod logs {
+            pub mod v1 {
+                include!("opentelemetry.proto.logs.v1.rs");
+            }
+        }
+        pub mod trace {
+            pub mod v1 {
+                include!("opentelemetry.proto.trace.v1.rs");
+            }
+        }
         pub mod collector {
             pub mod metrics {
                 pub mod v1 {
                     include!("opentelemetry.proto.collector.metrics.v1.rs");
+                }
+            }
+            pub mod logs {
+                pub mod v1 {
+                    include!("opentelemetry.proto.collector.logs.v1.rs");
+                }
+            }
+            pub mod trace {
+                pub mod v1 {
+                    include!("opentelemetry.proto.collector.trace.v1.rs");
                 }
             }
         }
@@ -81,19 +103,21 @@ unsafe fn extension_entrypoint_internal(
 
     // Register table functions
     metrics::register(&con)?;
+    logs::register(&con)?;
+    traces::register(&con)?;
 
     Ok(true)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn otel_metrics_init_c_api(
+pub unsafe extern "C" fn otel_binpb_init_c_api(
     info: ffi::duckdb_extension_info,
     access: *const ffi::duckdb_extension_access,
 ) -> bool {
     match extension_entrypoint_internal(info, access) {
         Ok(result) => result,
         Err(e) => {
-            eprintln!("OTel Metrics extension init failed: {}", e);
+            eprintln!("OTel binpb extension init failed: {}", e);
             false
         }
     }

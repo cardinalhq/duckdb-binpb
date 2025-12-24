@@ -1,10 +1,10 @@
--- OTel Metrics Extension Integration Tests
+-- OTel Binpb Extension Integration Tests
 -- Run with: duckdb -unsigned < test/integration_test.sql
 
 .bail on
 
 -- Load the extension
-LOAD 'build/release/otel_metrics.duckdb_extension';
+LOAD 'build/release/otel_binpb.duckdb_extension';
 
 -- Test 1: Read uncompressed binpb file
 SELECT '=== Test 1: Read uncompressed binpb ===' as test;
@@ -80,5 +80,113 @@ FROM otel_metrics_read('testdata/metrics_*.binpb.gz', customer_id='test')
 GROUP BY metric_name, chq_tid
 ORDER BY points DESC
 LIMIT 5;
+
+-- ============================================================================
+-- LOGS TESTS
+-- ============================================================================
+
+-- Test 10: Read logs files
+SELECT '=== Test 10: Read logs files ===' as test;
+SELECT count(*) as logs_row_count FROM otel_logs_read('testdata/logs_*.binpb.gz', customer_id='test');
+
+-- Test 11: Verify logs schema columns
+SELECT '=== Test 11: Verify logs schema ===' as test;
+SELECT
+    chq_customer_id,
+    chq_telemetry_type,
+    chq_timestamp,
+    chq_tsns,
+    log_level,
+    log_message,
+    metric_name,
+    scope_name
+FROM otel_logs_read('testdata/logs_*.binpb.gz', customer_id='logs-test')
+LIMIT 3;
+
+-- Test 12: Aggregate logs by severity level
+SELECT '=== Test 12: Logs by severity ===' as test;
+SELECT
+    log_level,
+    count(*) as count
+FROM otel_logs_read('testdata/logs_*.binpb.gz', customer_id='test')
+GROUP BY log_level
+ORDER BY count DESC;
+
+-- Test 13: Logs with trace correlation
+SELECT '=== Test 13: Logs with trace correlation ===' as test;
+SELECT
+    count(*) as total_logs,
+    count(trace_id) as with_trace_id,
+    count(span_id) as with_span_id
+FROM otel_logs_read('testdata/logs_*.binpb.gz', customer_id='test');
+
+-- Test 14: Write logs to parquet
+SELECT '=== Test 14: Write logs to parquet ===' as test;
+COPY (
+    SELECT * FROM otel_logs_read('testdata/logs_*.binpb.gz', customer_id='parquet-test')
+    ORDER BY chq_timestamp
+) TO '/tmp/integration_test_logs.parquet' (FORMAT PARQUET, COMPRESSION ZSTD);
+SELECT count(*) as logs_parquet_rows FROM '/tmp/integration_test_logs.parquet';
+
+-- ============================================================================
+-- TRACES TESTS
+-- ============================================================================
+
+-- Test 15: Read traces files
+SELECT '=== Test 15: Read traces files ===' as test;
+SELECT count(*) as traces_row_count FROM otel_traces_read('testdata/traces_*.binpb.gz', customer_id='test');
+
+-- Test 16: Verify traces schema columns
+SELECT '=== Test 16: Verify traces schema ===' as test;
+SELECT
+    chq_customer_id,
+    chq_telemetry_type,
+    chq_timestamp,
+    span_trace_id,
+    span_id,
+    span_parent_span_id,
+    span_name,
+    span_kind,
+    span_status_code,
+    span_duration
+FROM otel_traces_read('testdata/traces_*.binpb.gz', customer_id='traces-test')
+LIMIT 3;
+
+-- Test 17: Aggregate traces by span kind
+SELECT '=== Test 17: Traces by span kind ===' as test;
+SELECT
+    span_kind,
+    count(*) as count
+FROM otel_traces_read('testdata/traces_*.binpb.gz', customer_id='test')
+GROUP BY span_kind
+ORDER BY count DESC;
+
+-- Test 18: Traces duration statistics
+SELECT '=== Test 18: Traces duration stats ===' as test;
+SELECT
+    span_kind,
+    count(*) as span_count,
+    min(span_duration) as min_duration_ms,
+    max(span_duration) as max_duration_ms,
+    avg(span_duration)::INTEGER as avg_duration_ms
+FROM otel_traces_read('testdata/traces_*.binpb.gz', customer_id='test')
+GROUP BY span_kind
+ORDER BY span_kind;
+
+-- Test 19: Root vs child spans
+SELECT '=== Test 19: Root vs child spans ===' as test;
+SELECT
+    CASE WHEN span_parent_span_id = '' THEN 'root' ELSE 'child' END as span_type,
+    count(*) as count
+FROM otel_traces_read('testdata/traces_*.binpb.gz', customer_id='test')
+GROUP BY span_type;
+
+-- Test 20: Write traces to parquet
+SELECT '=== Test 20: Write traces to parquet ===' as test;
+COPY (
+    SELECT * FROM otel_traces_read('testdata/traces_*.binpb.gz', customer_id='parquet-test')
+    ORDER BY span_trace_id, chq_timestamp
+) TO '/tmp/integration_test_traces.parquet' (FORMAT PARQUET, COMPRESSION ZSTD);
+SELECT count(*) as traces_parquet_rows FROM '/tmp/integration_test_traces.parquet';
 
 SELECT '=== All tests passed! ===' as result;

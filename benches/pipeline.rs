@@ -8,9 +8,9 @@
 //! Pipeline benchmark - measures each step of processing binpb files
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use otel_metrics::common::read_binpb_file;
-use otel_metrics::metrics::parse_metrics;
-use otel_metrics::opentelemetry::proto::collector::metrics::v1::ExportMetricsServiceRequest;
+use otel_binpb::common::read_binpb_file;
+use otel_binpb::metrics::parse_metrics;
+use otel_binpb::opentelemetry::proto::collector::metrics::v1::ExportMetricsServiceRequest;
 use prost::Message;
 
 fn get_test_files() -> Vec<String> {

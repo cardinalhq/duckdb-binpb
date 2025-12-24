@@ -1,7 +1,7 @@
 //! Memory benchmark to measure parsing memory usage independent of DuckDB
 
-use otel_metrics::common::read_binpb_file;
-use otel_metrics::metrics::parse_metrics;
+use otel_binpb::common::read_binpb_file;
+use otel_binpb::metrics::parse_metrics;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
