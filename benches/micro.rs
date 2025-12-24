@@ -7,12 +7,12 @@
 
 //! Micro-benchmarks for identifying specific bottlenecks
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use otel_metrics::common::read_binpb_file;
-use otel_metrics::normalize::normalize_attribute_name;
-use otel_metrics::sketch::{DDSketch, RollupStats};
-use otel_metrics::tid::compute_tid_from_otel;
-use otel_metrics::opentelemetry::proto::collector::metrics::v1::ExportMetricsServiceRequest;
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use otel_binpb::common::read_binpb_file;
+use otel_binpb::normalize::normalize_attribute_name;
+use otel_binpb::sketch::{DDSketch, RollupStats};
+use otel_binpb::tid::compute_tid_from_otel;
+use otel_binpb::opentelemetry::proto::collector::metrics::v1::ExportMetricsServiceRequest;
 use prost::Message;
 
 fn get_test_file_data() -> Vec<u8> {
@@ -182,7 +182,7 @@ fn count_datapoints(c: &mut Criterion) {
     for rm in &request.resource_metrics {
         for sm in &rm.scope_metrics {
             for metric in &sm.metrics {
-                use otel_metrics::opentelemetry::proto::metrics::v1::metric::Data;
+                use otel_binpb::opentelemetry::proto::metrics::v1::metric::Data;
                 match &metric.data {
                     Some(Data::Gauge(g)) => {
                         gauge_count += g.data_points.len();

@@ -8,13 +8,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Build and package extension (recommended)
 make release
 
-# Extension output: build/release/otel_metrics.duckdb_extension
+# Extension output: build/release/otel_binpb.duckdb_extension
 
 # Run tests
 cargo test
 
 # Test extension in DuckDB
-duckdb -unsigned -c "LOAD 'build/release/otel_metrics.duckdb_extension';"
+duckdb -unsigned -c "LOAD 'build/release/otel_binpb.duckdb_extension';"
 ```
 
 ## Critical: DuckDB API Version
@@ -28,7 +28,7 @@ Check that `TARGET_DUCKDB_VERSION=v1.2.0` in the Makefile.
 
 ## Architecture
 
-This is a Rust DuckDB extension for reading OpenTelemetry binary protobuf (binpb) metric files.
+This is a Rust DuckDB extension for reading OpenTelemetry binary protobuf (binpb) files (metrics, logs, traces).
 
 ### Source Files
 

@@ -2,7 +2,7 @@
 
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
-EXTENSION_NAME=otel_metrics
+EXTENSION_NAME=otel_binpb
 
 # Set to 0 to use stable C API (allows loading with compatible DuckDB versions)
 # Set to 1 to pin to exact DuckDB version (for unstable API features)

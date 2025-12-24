@@ -6,7 +6,7 @@
 // (at your option) any later version.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use otel_metrics::normalize::normalize_attribute_name;
+use otel_binpb::normalize::normalize_attribute_name;
 
 fn bench_normalize(c: &mut Criterion) {
     let test_cases = [
