@@ -7,7 +7,7 @@
 
 //! Micro-benchmarks for identifying specific bottlenecks
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use otel_metrics::common::read_binpb_file;
 use otel_metrics::normalize::normalize_attribute_name;
 use otel_metrics::sketch::{DDSketch, RollupStats};
