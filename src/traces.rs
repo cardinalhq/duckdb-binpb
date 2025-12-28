@@ -28,6 +28,7 @@ use std::{
 };
 
 use crate::common::{any_value_to_string, read_binpb_file};
+use crate::fingerprint::generate_span_fingerprints;
 use crate::normalize::normalize_attribute_name;
 use crate::opentelemetry::proto::{
     collector::trace::v1::ExportTraceServiceRequest,
@@ -48,6 +49,7 @@ pub struct SpanRow {
     pub chq_telemetry_type: String, // Always "traces"
     pub chq_timestamp: i64,         // Start time in milliseconds
     pub chq_tsns: i64,              // Start time in nanoseconds
+    pub chq_fingerprint: String,    // JSON array of fingerprint i64 values
 
     // Span identification
     pub span_trace_id: String,
@@ -212,12 +214,34 @@ pub fn parse_traces(
                         }
                     });
 
+                let span_attrs = extract_attrs_with_prefix(&span.attributes, "attr");
+                let trace_id = bytes_to_hex(&span.trace_id);
+
+                // Compute fingerprints for this span
+                let fingerprints = generate_span_fingerprints(
+                    &resource_attrs,
+                    &scope_attrs,
+                    &span_attrs,
+                    "traces",
+                    &trace_id,
+                );
+                // Format fingerprints as JSON array
+                let chq_fingerprint = format!(
+                    "[{}]",
+                    fingerprints
+                        .iter()
+                        .map(|f| f.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+
                 rows.push(SpanRow {
                     chq_customer_id: customer_id.to_string(),
                     chq_telemetry_type: "traces".to_string(),
                     chq_timestamp: start_ms,
                     chq_tsns: get_timestamp_ns(span.start_time_unix_nano),
-                    span_trace_id: bytes_to_hex(&span.trace_id),
+                    chq_fingerprint,
+                    span_trace_id: trace_id,
                     span_id: bytes_to_hex(&span.span_id),
                     span_parent_span_id: bytes_to_hex(&span.parent_span_id),
                     span_name: span.name.clone(),
@@ -230,7 +254,7 @@ pub fn parse_traces(
                     scope_version: scope_version.clone(),
                     resource_attrs: Arc::clone(&resource_attrs),
                     scope_attrs: scope_attrs.clone(),
-                    span_attrs: extract_attrs_with_prefix(&span.attributes, "attr"),
+                    span_attrs,
                 });
             }
         }
@@ -343,6 +367,7 @@ impl VTab for ReadTracesVTab {
         bind.add_result_column("chq_telemetry_type", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("chq_timestamp", LogicalTypeHandle::from(LogicalTypeId::Bigint));
         bind.add_result_column("chq_tsns", LogicalTypeHandle::from(LogicalTypeId::Bigint));
+        bind.add_result_column("chq_fingerprint", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("span_trace_id", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("span_id", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("span_parent_span_id", LogicalTypeHandle::from(LogicalTypeId::Varchar));
@@ -412,6 +437,9 @@ impl VTab for ReadTracesVTab {
             col += 1;
 
             output.flat_vector(col).as_mut_slice::<i64>()[i] = row.chq_tsns;
+            col += 1;
+
+            output.flat_vector(col).insert(i, row.chq_fingerprint.as_bytes());
             col += 1;
 
             output.flat_vector(col).insert(i, row.span_trace_id.as_bytes());
@@ -680,6 +708,10 @@ mod tests {
         assert_eq!(row1.span_status_code, "STATUS_CODE_OK");
         assert_eq!(row1.span_duration, 50); // 50ms
         assert!(row1.span_parent_span_id.is_empty()); // Root span
+        // Verify fingerprint is a JSON array with at least one value
+        assert!(row1.chq_fingerprint.starts_with('['), "Fingerprint should be JSON array");
+        assert!(row1.chq_fingerprint.ends_with(']'), "Fingerprint should be JSON array");
+        assert!(row1.chq_fingerprint.len() > 2, "Fingerprint array should not be empty");
 
         let row2 = &rows[1];
         assert_eq!(row2.span_name, "SELECT users");
