@@ -32,6 +32,7 @@ fn main() -> Result<()> {
 
     prost_build::Config::new()
         .out_dir("src/")
+        .disable_comments(["."])  // Skip doc comments to avoid doctest failures
         .compile_protos(&proto_files, &["proto/"])?;
 
     Ok(())

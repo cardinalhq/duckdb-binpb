@@ -20,6 +20,7 @@
 //! filtering on indexed dimensions.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 /// ExistsRegex is the wildcard pattern used for "field exists" fingerprints.
 pub const EXISTS_REGEX: &str = ".*";
@@ -48,7 +49,8 @@ impl IndexFlags {
 
 /// IndexedDimensions maps dimension names to their indexing strategy.
 /// Fields not in this map only get "exists" fingerprints.
-pub fn indexed_dimensions() -> HashMap<&'static str, IndexFlags> {
+/// Initialized once via LazyLock to avoid repeated allocations.
+static INDEXED_DIMENSIONS: LazyLock<HashMap<&'static str, IndexFlags>> = LazyLock::new(|| {
     let mut m = HashMap::new();
     m.insert("chq_telemetry_type", IndexFlags::TRIGRAM_EXACT);
     m.insert("log_level", IndexFlags::EXACT);
@@ -60,7 +62,7 @@ pub fn indexed_dimensions() -> HashMap<&'static str, IndexFlags> {
     m.insert("resource_service_name", IndexFlags::TRIGRAM_EXACT);
     m.insert("span_trace_id", IndexFlags::TRIGRAM_EXACT);
     m
-}
+});
 
 /// Compute the hash of a string using the same algorithm as Go's ComputeHash.
 ///
@@ -126,7 +128,7 @@ pub fn to_trigrams(s: &str) -> HashSet<String> {
 /// This matches the Go ToFingerprints function.
 pub fn to_fingerprints(tag_values_by_name: &HashMap<String, HashSet<String>>) -> HashSet<i64> {
     let mut fingerprints = HashSet::new();
-    let indexed = indexed_dimensions();
+    let indexed = &*INDEXED_DIMENSIONS;
 
     for (tag_name, values) in tag_values_by_name {
         // Always add "exists" fingerprint for every field
