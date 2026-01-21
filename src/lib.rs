@@ -23,6 +23,7 @@ extern crate libduckdb_sys;
 
 pub mod common;
 pub mod fingerprint;
+pub mod log_fingerprint;
 pub mod logs;
 pub mod metrics;
 pub mod normalize;
