@@ -81,10 +81,15 @@ pub struct SpanRow {
 // ============================================================================
 
 /// Extract attributes as (normalized_key, value_string) pairs with prefix
+/// Filters out underscore-prefixed keys and empty values
 fn extract_attrs_with_prefix(attrs: &[KeyValue], prefix: &str) -> Vec<(String, String)> {
     attrs
         .iter()
         .filter_map(|kv| {
+            // Skip underscore-prefixed keys (internal/private attributes)
+            if kv.key.starts_with('_') {
+                return None;
+            }
             let value = any_value_to_string(&kv.value);
             if value.is_empty() {
                 None
@@ -792,5 +797,100 @@ mod tests {
         assert_eq!(rows[0].span_duration, 0);
         // Timestamps should be non-zero (current time)
         assert!(rows[0].chq_timestamp > 0);
+    }
+
+    #[test]
+    fn test_underscore_prefixed_attributes_filtered() {
+        // Attributes starting with underscore should be filtered out
+        let request = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: Some(Resource {
+                    attributes: vec![
+                        KeyValue {
+                            key: "service.name".to_string(),
+                            value: Some(AnyValue {
+                                value: Some(any_value::Value::StringValue("test".to_string())),
+                            }),
+                        },
+                        KeyValue {
+                            key: "_cardinalhq.internal".to_string(),
+                            value: Some(AnyValue {
+                                value: Some(any_value::Value::StringValue("should-be-filtered".to_string())),
+                            }),
+                        },
+                    ],
+                    dropped_attributes_count: 0,
+                    entity_refs: vec![],
+                }),
+                scope_spans: vec![ScopeSpans {
+                    scope: Some(InstrumentationScope {
+                        name: "test".to_string(),
+                        version: "1.0".to_string(),
+                        attributes: vec![
+                            KeyValue {
+                                key: "_internal.scope".to_string(),
+                                value: Some(AnyValue {
+                                    value: Some(any_value::Value::StringValue("filtered".to_string())),
+                                }),
+                            },
+                        ],
+                        dropped_attributes_count: 0,
+                    }),
+                    spans: vec![Span {
+                        trace_id: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+                        span_id: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                        trace_state: "".to_string(),
+                        parent_span_id: vec![],
+                        flags: 0,
+                        name: "test-span".to_string(),
+                        kind: SpanKind::Internal as i32,
+                        start_time_unix_nano: 1700000000_000_000_000,
+                        end_time_unix_nano: 1700000000_010_000_000,
+                        attributes: vec![
+                            KeyValue {
+                                key: "normal.attr".to_string(),
+                                value: Some(AnyValue {
+                                    value: Some(any_value::Value::StringValue("kept".to_string())),
+                                }),
+                            },
+                            KeyValue {
+                                key: "_hidden.attr".to_string(),
+                                value: Some(AnyValue {
+                                    value: Some(any_value::Value::StringValue("filtered".to_string())),
+                                }),
+                            },
+                        ],
+                        dropped_attributes_count: 0,
+                        events: vec![],
+                        dropped_events_count: 0,
+                        links: vec![],
+                        dropped_links_count: 0,
+                        status: None,
+                    }],
+                    schema_url: "".to_string(),
+                }],
+                schema_url: "".to_string(),
+            }],
+        };
+
+        let encoded = request.encode_to_vec();
+        let rows = parse_traces(&encoded, "test").expect("Failed to parse");
+
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+
+        // Check resource attributes - _cardinalhq.internal should be filtered
+        let resource_keys: Vec<_> = row.resource_attrs.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(resource_keys.contains(&"resource_service_name"));
+        assert!(!resource_keys.iter().any(|k| k.contains("cardinalhq")));
+
+        // Check scope attributes - _internal.scope should be filtered
+        let scope_keys: Vec<_> = row.scope_attrs.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(!scope_keys.iter().any(|k| k.contains("internal")));
+
+        // Check span attributes - _hidden.attr should be filtered
+        let span_keys: Vec<_> = row.span_attrs.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(span_keys.contains(&"attr_normal_attr"));
+        assert!(!span_keys.iter().any(|k| k.contains("hidden")));
     }
 }

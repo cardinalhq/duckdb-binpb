@@ -88,10 +88,15 @@ pub struct LogRow {
 // ============================================================================
 
 /// Extract attributes as (normalized_key, value_string) pairs with prefix
+/// Filters out underscore-prefixed keys and empty values
 fn extract_attrs_with_prefix(attrs: &[KeyValue], prefix: &str) -> Vec<(String, String)> {
     attrs
         .iter()
         .filter_map(|kv| {
+            // Skip underscore-prefixed keys (internal/private attributes)
+            if kv.key.starts_with('_') {
+                return None;
+            }
             let value = any_value_to_string(&kv.value);
             if value.is_empty() {
                 None
@@ -982,5 +987,97 @@ mod tests {
         let tenant_ids = TENANT_MANAGER.tenant_ids();
         assert!(tenant_ids.contains(&"tenant-1".to_string()));
         assert!(tenant_ids.contains(&"tenant-2".to_string()));
+    }
+
+    #[test]
+    fn test_underscore_prefixed_attributes_filtered() {
+        // Attributes starting with underscore should be filtered out
+        let request = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: Some(Resource {
+                    attributes: vec![
+                        KeyValue {
+                            key: "service.name".to_string(),
+                            value: Some(AnyValue {
+                                value: Some(any_value::Value::StringValue("test".to_string())),
+                            }),
+                        },
+                        KeyValue {
+                            key: "_cardinalhq.internal".to_string(),
+                            value: Some(AnyValue {
+                                value: Some(any_value::Value::StringValue("should-be-filtered".to_string())),
+                            }),
+                        },
+                    ],
+                    dropped_attributes_count: 0,
+                    entity_refs: vec![],
+                }),
+                scope_logs: vec![ScopeLogs {
+                    scope: Some(InstrumentationScope {
+                        name: "test".to_string(),
+                        version: "1.0".to_string(),
+                        attributes: vec![
+                            KeyValue {
+                                key: "_internal.scope".to_string(),
+                                value: Some(AnyValue {
+                                    value: Some(any_value::Value::StringValue("filtered".to_string())),
+                                }),
+                            },
+                        ],
+                        dropped_attributes_count: 0,
+                    }),
+                    log_records: vec![LogRecord {
+                        time_unix_nano: 1700000000_000_000_000,
+                        observed_time_unix_nano: 1700000000_000_000_000,
+                        severity_number: 9,
+                        severity_text: "INFO".to_string(),
+                        body: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue("Test".to_string())),
+                        }),
+                        attributes: vec![
+                            KeyValue {
+                                key: "normal.attr".to_string(),
+                                value: Some(AnyValue {
+                                    value: Some(any_value::Value::StringValue("kept".to_string())),
+                                }),
+                            },
+                            KeyValue {
+                                key: "_hidden.attr".to_string(),
+                                value: Some(AnyValue {
+                                    value: Some(any_value::Value::StringValue("filtered".to_string())),
+                                }),
+                            },
+                        ],
+                        dropped_attributes_count: 0,
+                        flags: 0,
+                        trace_id: vec![],
+                        span_id: vec![],
+                        event_name: String::new(),
+                    }],
+                    schema_url: "".to_string(),
+                }],
+                schema_url: "".to_string(),
+            }],
+        };
+
+        let encoded = request.encode_to_vec();
+        let rows = parse_logs(&encoded, "test", &[]).expect("Failed to parse");
+
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+
+        // Check resource attributes - _cardinalhq.internal should be filtered
+        let resource_keys: Vec<_> = row.resource_attrs.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(resource_keys.contains(&"resource_service_name"));
+        assert!(!resource_keys.iter().any(|k| k.contains("cardinalhq")));
+
+        // Check scope attributes - _internal.scope should be filtered
+        let scope_keys: Vec<_> = row.scope_attrs.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(!scope_keys.iter().any(|k| k.contains("internal")));
+
+        // Check log attributes - _hidden.attr should be filtered
+        let log_keys: Vec<_> = row.log_attrs.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(log_keys.contains(&"attr_normal_attr"));
+        assert!(!log_keys.iter().any(|k| k.contains("hidden")));
     }
 }
