@@ -28,30 +28,75 @@ pub struct JsonContent {
     pub suffix: String,
 }
 
-/// Find JSON content in a string.
+/// Find JSON content in a string using balanced brace counting.
 ///
 /// Returns the prefix before JSON, the JSON content, and the suffix after.
-/// If no JSON is found, returns empty strings.
+/// If no valid JSON object is found, returns empty strings.
+/// Handles nested braces and braces within string literals correctly.
 pub fn find_json_content(input: &str) -> JsonContent {
-    let start = match input.find('{') {
-        Some(pos) => pos,
-        None => return JsonContent::default(),
-    };
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut idx = 0;
 
-    let end = match input.rfind('}') {
-        Some(pos) => pos,
-        None => return JsonContent::default(),
-    };
+    while idx < len {
+        // Look for the next potential JSON object start
+        if bytes[idx] != b'{' {
+            idx += 1;
+            continue;
+        }
 
-    if end <= start {
-        return JsonContent::default();
+        let start = idx;
+        let mut brace_depth: i32 = 0;
+        let mut in_string = false;
+        let mut escape = false;
+        let mut end: Option<usize> = None;
+
+        let mut j = start;
+        while j < len {
+            let c = bytes[j];
+
+            if in_string {
+                if escape {
+                    escape = false;
+                } else if c == b'\\' {
+                    escape = true;
+                } else if c == b'"' {
+                    in_string = false;
+                }
+            } else {
+                match c {
+                    b'"' => in_string = true,
+                    b'{' => brace_depth += 1,
+                    b'}' => {
+                        brace_depth -= 1;
+                        if brace_depth == 0 {
+                            end = Some(j);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            j += 1;
+        }
+
+        if let Some(end_idx) = end {
+            // Verify it's valid JSON by attempting to parse
+            let candidate = &input[start..=end_idx];
+            if serde_json::from_str::<Value>(candidate).is_ok() {
+                return JsonContent {
+                    prefix: input[..start].to_string(),
+                    json: candidate.to_string(),
+                    suffix: input[end_idx + 1..].to_string(),
+                };
+            }
+        }
+
+        // Move past this '{' and look for the next candidate
+        idx = start + 1;
     }
 
-    JsonContent {
-        prefix: input[..start].to_string(),
-        json: input[start..=end].to_string(),
-        suffix: input[end + 1..].to_string(),
-    }
+    JsonContent::default()
 }
 
 /// Look up a key in a nested JSON object, searching recursively.

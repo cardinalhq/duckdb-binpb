@@ -198,7 +198,9 @@ pub fn parse_logs(
                     Some(log.severity_text.clone())
                 };
 
-                // Generate fingerprint from log message
+                // Generate fingerprint from log message.
+                // A fingerprint of 0 indicates either no message or tokenization failure.
+                // We don't log errors here since this is a library - callers can check for 0.
                 let chq_fingerprint = if let Some(ref msg) = log_message {
                     match fingerprinter.tokenize_input(msg) {
                         Ok((tokens, _level, json_keys)) => {

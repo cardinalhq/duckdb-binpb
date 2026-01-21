@@ -58,7 +58,9 @@ pub fn is_word(word: &str) -> bool {
         return false;
     }
 
-    parts.iter().all(|part| is_word(part))
+    // Check each part directly against dictionary (parts are lowercase from split_words)
+    // No recursion needed since parts are already lowercase
+    parts.iter().all(|part| ENGLISH_WORDS.contains(part.as_str()))
 }
 
 /// Split a word by camelCase and snake_case boundaries.
@@ -72,7 +74,7 @@ pub fn split_words(input: &str) -> Vec<String> {
     for (i, &c) in chars.iter().enumerate() {
         if c.is_uppercase() {
             // Start of a new word if not first char and previous wasn't underscore
-            if i != 0 && (i == 0 || chars.get(i - 1) != Some(&'_')) {
+            if i != 0 && chars.get(i - 1) != Some(&'_') {
                 if !current.is_empty() {
                     result.push(current);
                     current = String::new();

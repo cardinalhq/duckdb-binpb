@@ -109,10 +109,14 @@ impl LeafClusterer {
     ///
     /// If a matching cluster exists (Jaccard >= threshold), returns its fingerprint.
     /// Otherwise creates a new cluster.
+    ///
+    /// Note: This intentionally records match attempts for ALL clusters, not just until
+    /// the first match. This matches the Go implementation behavior and allows tracking
+    /// match rates across all clusters for potential reordering optimization.
     pub fn add(&mut self, tokens: &[String], json_keys: &[String]) -> i64 {
         let incoming: HashSet<String> = tokens.iter().cloned().collect();
 
-        // Try to match existing clusters
+        // Try to match existing clusters (record for all to track match rates)
         let mut matched_idx: Option<usize> = None;
         for (idx, cluster) in self.clusters.iter_mut().enumerate() {
             let score = jaccard_similarity(&cluster.token_set, &incoming);
@@ -417,6 +421,11 @@ impl TenantManager {
 /// Global tenant manager for log fingerprinting.
 ///
 /// Uses a default threshold of 0.5 for Jaccard similarity clustering.
+///
+/// **Note**: This stores cluster managers indefinitely without automatic cleanup.
+/// Use `remove_tenant()` for manual cleanup when tenants are no longer needed.
+/// For long-running processes with many tenants, consider implementing external
+/// eviction logic based on `Cluster::last_updated` timestamps.
 pub static TENANT_MANAGER: once_cell::sync::Lazy<TenantManager> =
     once_cell::sync::Lazy::new(|| TenantManager::new(0.5));
 
