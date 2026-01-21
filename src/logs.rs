@@ -29,11 +29,22 @@ use std::{
 };
 
 use crate::common::{any_value_to_string, read_binpb_file};
+use crate::log_fingerprint::cluster::TENANT_MANAGER;
+use crate::log_fingerprint::Fingerprinter;
 use crate::normalize::normalize_attribute_name;
 use crate::opentelemetry::proto::{
     collector::logs::v1::ExportLogsServiceRequest,
     common::v1::KeyValue,
 };
+
+// ============================================================================
+// ID Generation
+// ============================================================================
+
+/// Generate a unique ULID for record identification.
+fn generate_ulid() -> String {
+    ulid::Ulid::new().to_string().to_lowercase()
+}
 
 // ============================================================================
 // Flattened log row representation
@@ -43,10 +54,12 @@ use crate::opentelemetry::proto::{
 #[derive(Debug, Clone)]
 pub struct LogRow {
     // CHQ system fields
+    pub chq_id: String,             // Unique record ID (ULID)
     pub chq_customer_id: String,
     pub chq_telemetry_type: String, // Always "logs"
     pub chq_timestamp: i64,         // Milliseconds
     pub chq_tsns: i64,              // Original nanoseconds
+    pub chq_fingerprint: i64,       // Log fingerprint for grouping
 
     // Log-specific fields
     pub log_level: Option<String>,   // Severity text (uppercase)
@@ -143,6 +156,10 @@ pub fn parse_logs(
     let request = ExportLogsServiceRequest::decode(data)?;
     let mut rows = Vec::new();
 
+    // Get the tenant's cluster manager for fingerprinting
+    let cluster_manager = TENANT_MANAGER.get_or_create(customer_id);
+    let fingerprinter = Fingerprinter::new();
+
     for rl in &request.resource_logs {
         // Get resource attributes (wrapped in Arc for sharing)
         let resource_attrs = Arc::new(
@@ -181,14 +198,29 @@ pub fn parse_logs(
                     Some(log.severity_text.clone())
                 };
 
+                // Generate fingerprint from log message
+                let chq_fingerprint = if let Some(ref msg) = log_message {
+                    match fingerprinter.tokenize_input(msg) {
+                        Ok((tokens, _level, json_keys)) => {
+                            let json_keys = json_keys.unwrap_or_default();
+                            cluster_manager.cluster(&tokens, &json_keys)
+                        }
+                        Err(_) => 0,
+                    }
+                } else {
+                    0
+                };
+
                 // Extract log attributes
                 let log_attrs = extract_attrs_with_prefix(&log.attributes, "attr");
 
                 rows.push(LogRow {
+                    chq_id: generate_ulid(),
                     chq_customer_id: customer_id.to_string(),
                     chq_telemetry_type: "logs".to_string(),
                     chq_timestamp: get_timestamp_ms(log.time_unix_nano, log.observed_time_unix_nano),
                     chq_tsns: get_timestamp_ns(log.time_unix_nano, log.observed_time_unix_nano),
+                    chq_fingerprint,
                     log_level,
                     log_message,
                     metric_name: "log_events".to_string(),
@@ -396,10 +428,12 @@ impl VTab for ReadLogsVTab {
             collect_attr_names(&all_rows);
 
         // Fixed columns - CHQ schema for logs
+        bind.add_result_column("chq_id", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("chq_customer_id", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("chq_telemetry_type", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("chq_timestamp", LogicalTypeHandle::from(LogicalTypeId::Bigint));
         bind.add_result_column("chq_tsns", LogicalTypeHandle::from(LogicalTypeId::Bigint));
+        bind.add_result_column("chq_fingerprint", LogicalTypeHandle::from(LogicalTypeId::Bigint));
         bind.add_result_column("log_level", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("log_message", LogicalTypeHandle::from(LogicalTypeId::Varchar));
         bind.add_result_column("metric_name", LogicalTypeHandle::from(LogicalTypeId::Varchar));
@@ -459,6 +493,9 @@ impl VTab for ReadLogsVTab {
             let mut col = 0;
 
             // Fixed columns
+            output.flat_vector(col).insert(i, row.chq_id.as_bytes());
+            col += 1;
+
             output.flat_vector(col).insert(i, row.chq_customer_id.as_bytes());
             col += 1;
 
@@ -469,6 +506,9 @@ impl VTab for ReadLogsVTab {
             col += 1;
 
             output.flat_vector(col).as_mut_slice::<i64>()[i] = row.chq_tsns;
+            col += 1;
+
+            output.flat_vector(col).as_mut_slice::<i64>()[i] = row.chq_fingerprint;
             col += 1;
 
             // log_level (nullable)
@@ -812,5 +852,133 @@ mod tests {
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0].path, "file1.binpb");
         assert!(inputs[0].metadata.iter().any(|(k, _)| k == "resource_bucket_name"));
+    }
+
+    #[test]
+    fn test_parse_logs_with_fingerprint() {
+        let request = create_sample_request();
+        let encoded = request.encode_to_vec();
+
+        let rows = parse_logs(&encoded, "test-customer", &[]).expect("Failed to parse logs");
+
+        assert_eq!(rows.len(), 2);
+
+        // Verify fingerprints are generated (non-zero for non-empty messages)
+        assert_ne!(rows[0].chq_fingerprint, 0, "Fingerprint should be generated for non-empty message");
+        assert_ne!(rows[1].chq_fingerprint, 0, "Fingerprint should be generated for non-empty message");
+
+        // Verify chq_id is generated (ULID format - 26 chars lowercase)
+        assert_eq!(rows[0].chq_id.len(), 26, "chq_id should be 26 characters (ULID)");
+        assert_eq!(rows[1].chq_id.len(), 26, "chq_id should be 26 characters (ULID)");
+        assert_ne!(rows[0].chq_id, rows[1].chq_id, "Each row should have unique chq_id");
+    }
+
+    #[test]
+    fn test_similar_logs_get_same_fingerprint() {
+        // Two similar log messages should get the same fingerprint (Jaccard clustering)
+        let request = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: None,
+                scope_logs: vec![ScopeLogs {
+                    scope: None,
+                    log_records: vec![
+                        LogRecord {
+                            time_unix_nano: 1700000000_000_000_000,
+                            observed_time_unix_nano: 1700000000_000_000_000,
+                            severity_number: 9,
+                            severity_text: "INFO".to_string(),
+                            body: Some(AnyValue {
+                                value: Some(any_value::Value::StringValue(
+                                    "User logged in from 192.168.1.100".to_string(),
+                                )),
+                            }),
+                            attributes: vec![],
+                            dropped_attributes_count: 0,
+                            flags: 0,
+                            trace_id: vec![],
+                            span_id: vec![],
+                            event_name: String::new(),
+                        },
+                        LogRecord {
+                            time_unix_nano: 1700000001_000_000_000,
+                            observed_time_unix_nano: 1700000001_000_000_000,
+                            severity_number: 9,
+                            severity_text: "INFO".to_string(),
+                            body: Some(AnyValue {
+                                value: Some(any_value::Value::StringValue(
+                                    "User logged in from 10.0.0.50".to_string(),
+                                )),
+                            }),
+                            attributes: vec![],
+                            dropped_attributes_count: 0,
+                            flags: 0,
+                            trace_id: vec![],
+                            span_id: vec![],
+                            event_name: String::new(),
+                        },
+                    ],
+                    schema_url: "".to_string(),
+                }],
+                schema_url: "".to_string(),
+            }],
+        };
+
+        let encoded = request.encode_to_vec();
+        let rows = parse_logs(&encoded, "test-customer", &[]).expect("Failed to parse");
+
+        assert_eq!(rows.len(), 2);
+        // Similar messages with only IP address difference should cluster together
+        assert_eq!(
+            rows[0].chq_fingerprint, rows[1].chq_fingerprint,
+            "Similar log messages should have the same fingerprint"
+        );
+    }
+
+    #[test]
+    fn test_tenant_isolation() {
+        // Different tenants should have separate cluster managers
+        let request = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: None,
+                scope_logs: vec![ScopeLogs {
+                    scope: None,
+                    log_records: vec![LogRecord {
+                        time_unix_nano: 1700000000_000_000_000,
+                        observed_time_unix_nano: 1700000000_000_000_000,
+                        severity_number: 9,
+                        severity_text: "INFO".to_string(),
+                        body: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue(
+                                "Test log message".to_string(),
+                            )),
+                        }),
+                        attributes: vec![],
+                        dropped_attributes_count: 0,
+                        flags: 0,
+                        trace_id: vec![],
+                        span_id: vec![],
+                        event_name: String::new(),
+                    }],
+                    schema_url: "".to_string(),
+                }],
+                schema_url: "".to_string(),
+            }],
+        };
+
+        let encoded = request.encode_to_vec();
+
+        // Parse for two different tenants
+        let rows_tenant1 = parse_logs(&encoded, "tenant-1", &[]).expect("Failed to parse");
+        let rows_tenant2 = parse_logs(&encoded, "tenant-2", &[]).expect("Failed to parse");
+
+        // Both should generate valid fingerprints
+        assert_ne!(rows_tenant1[0].chq_fingerprint, 0);
+        assert_ne!(rows_tenant2[0].chq_fingerprint, 0);
+
+        // Verify TenantManager has both tenants
+        use crate::log_fingerprint::cluster::TENANT_MANAGER;
+        let tenant_ids = TENANT_MANAGER.tenant_ids();
+        assert!(tenant_ids.contains(&"tenant-1".to_string()));
+        assert!(tenant_ids.contains(&"tenant-2".to_string()));
     }
 }

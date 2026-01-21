@@ -5,7 +5,7 @@ A DuckDB extension for reading OpenTelemetry binary protobuf (binpb) files direc
 ## Features
 
 - **Metrics**: Read `ExportMetricsServiceRequest` with all metric types (Gauge, Sum, Histogram, ExponentialHistogram, Summary)
-- **Logs**: Read `ExportLogsServiceRequest` with severity levels and trace correlation
+- **Logs**: Read `ExportLogsServiceRequest` with severity levels, trace correlation, and fingerprinting for semantic grouping
 - **Traces**: Read `ExportTraceServiceRequest` with span hierarchy and duration calculation
 - Automatic gzip decompression for `.binpb.gz` files
 - Multiple file support: glob patterns or explicit list `[file1, file2]` with schema unioning
@@ -79,6 +79,15 @@ SELECT
 FROM otel_logs_read('logs/*.binpb.gz', customer_id='test')
 GROUP BY log_level
 ORDER BY count DESC;
+
+-- Group similar logs by fingerprint
+SELECT
+    chq_fingerprint,
+    any_value(log_message) as sample_message,
+    count(*) as occurrences
+FROM otel_logs_read('logs/*.binpb.gz', customer_id='test')
+GROUP BY chq_fingerprint
+ORDER BY occurrences DESC;
 
 -- Logs with trace correlation
 SELECT
@@ -230,10 +239,12 @@ Attributes are flattened into columns with normalized names:
 
 | Column | Type | Description |
 | -------- | ------ | ------------- |
+| `chq_id` | VARCHAR | Unique record identifier (ULID) |
 | `chq_customer_id` | VARCHAR | Customer identifier (from parameter) |
 | `chq_telemetry_type` | VARCHAR | Always "logs" |
 | `chq_timestamp` | BIGINT | Timestamp in milliseconds |
 | `chq_tsns` | BIGINT | Original timestamp in nanoseconds |
+| `chq_fingerprint` | BIGINT | Log fingerprint for semantic grouping (similar logs share same fingerprint) |
 | `log_level` | VARCHAR | Severity text (e.g., INFO, ERROR) |
 | `log_message` | VARCHAR | Log body as string |
 | `metric_name` | VARCHAR | Always "log_events" |
