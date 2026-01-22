@@ -1,6 +1,6 @@
 [package]
 name = "otel_binpb"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "DuckDB extension for reading OpenTelemetry binpb files (metrics, logs, traces)"
 license = "AGPL-3.0"
