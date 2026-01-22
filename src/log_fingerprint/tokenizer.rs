@@ -186,7 +186,12 @@ pub fn tokenize(input: &str) -> Vec<Token> {
             pos += len;
         } else {
             // Skip single character if no match
-            pos += 1;
+            // Must advance by full UTF-8 character, not just one byte
+            if let Some(c) = input[pos..].chars().next() {
+                pos += c.len_utf8();
+            } else {
+                break;
+            }
         }
     }
 
@@ -503,5 +508,24 @@ mod tests {
         // The fingerprinter will check IsWord() and handle it appropriately
         assert_eq!(tokens[0].literal, "hello");
         assert_eq!(tokens[1].literal, "world");
+    }
+
+    #[test]
+    fn test_multibyte_utf8_characters() {
+        // Test that tokenizer handles multi-byte UTF-8 characters without panicking
+        // '¡' is a 2-byte UTF-8 character, '¿' is another
+        let tokens = tokenize("Writing ¡Hola! ¿Cómo estás?");
+        // Should not panic and should tokenize successfully
+        assert!(!tokens.is_empty());
+    }
+
+    #[test]
+    fn test_long_text_with_multibyte_chars() {
+        // Test with a longer string containing multi-byte characters at various positions
+        // This simulates the panic scenario where byte indexing could fall mid-character
+        let long_text = "Processing record with id=1234567890 flag=true level=INFO data=sample info¡More text with unicode: café, naïve, Zürich. Additional content to ensure we test tokenization across a longer string with various UTF-8 characters like € and ñ.";
+        let tokens = tokenize(long_text);
+        // Should not panic and should successfully tokenize
+        assert!(!tokens.is_empty());
     }
 }
